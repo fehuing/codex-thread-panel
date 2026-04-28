@@ -27,6 +27,7 @@ function usage() {
 Usage:
   node CodexManagedSession.js start --thread-id ID --agent AGENT [--permission Normal] [--model MODEL] [--reasoning EFFORT]
   node CodexManagedSession.js start --to AGENT [--permission Normal] [--model MODEL] [--reasoning EFFORT]
+  node CodexManagedSession.js start --to AGENT --history 0
   node CodexManagedSession.js list [--all] [--json]
   node CodexManagedSession.js self-test
 
@@ -234,6 +235,69 @@ function promptForMessage(message, fallbackAgent, fallbackThreadId) {
   return header ? `${header}${body}` : body;
 }
 
+function messageText(payload) {
+  if (!payload) return "";
+  if (typeof payload.message === "string") return payload.message;
+  if (typeof payload.text === "string") return payload.text;
+  if (typeof payload.content === "string") return payload.content;
+  if (Array.isArray(payload.content)) {
+    return payload.content
+      .map((part) => {
+        if (!part) return "";
+        if (typeof part === "string") return part;
+        return part.text || part.input_text || part.output_text || "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  return "";
+}
+
+function transcriptItems(thread) {
+  const file = thread?.sourceFile || "";
+  if (!file || !fs.existsSync(file)) return [];
+  const items = [];
+  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    let obj = null;
+    try {
+      obj = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const payload = obj.payload || {};
+    if (obj.type !== "event_msg") continue;
+    if (payload.type === "user_message") {
+      items.push({ role: "User", timestamp: obj.timestamp || "", text: messageText(payload) });
+    } else if (payload.type === "agent_message") {
+      items.push({ role: "Assistant", timestamp: obj.timestamp || "", text: messageText(payload) });
+    }
+  }
+  return items.filter((item) => item.text.trim());
+}
+
+function replayHistory(thread, options) {
+  const enabled = String(options.history ?? process.env.CODEX_MANAGED_HISTORY_REPLAY ?? "1").toLowerCase() !== "0";
+  if (!enabled) return;
+  const items = transcriptItems(thread);
+  if (!items.length) return;
+  const maxChars = Number(options["history-max-chars"] || process.env.CODEX_MANAGED_HISTORY_REPLAY_MAX_CHARS || 2000000);
+  let written = 0;
+  process.stdout.write("\r\n===== Managed history replay =====\r\n");
+  process.stdout.write(`Thread: ${thread.title || thread.id}\r\n`);
+  process.stdout.write(`Messages: ${items.length}\r\n\r\n`);
+  for (const item of items) {
+    const block = `[${item.role}] ${item.timestamp}\r\n${item.text.trim()}\r\n\r\n`;
+    if (maxChars > 0 && written + block.length > maxChars) {
+      process.stdout.write(`[history replay truncated at ${maxChars} chars]\r\n\r\n`);
+      break;
+    }
+    process.stdout.write(block);
+    written += block.length;
+  }
+  process.stdout.write("===== End history replay; live Codex session starts below =====\r\n\r\n");
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -283,7 +347,7 @@ function startCommand(options) {
   console.log("Injection: send --to " + agentName + " --mode inject");
   const spawnSpec = buildCodexSpawn(args);
   console.log(`Command: ${spawnSpec.display}`);
-  console.log("");
+  replayHistory(thread, options);
 
   const term = pty.spawn(spawnSpec.file, spawnSpec.args, {
     name: "xterm-256color",
