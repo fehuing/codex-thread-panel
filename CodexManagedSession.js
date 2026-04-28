@@ -80,6 +80,43 @@ function setTerminalTitle(title) {
   process.stdout.write(`\x1b]0;${clean}\x07`);
 }
 
+function createTitleFilter() {
+  let pending = "";
+  return (data) => {
+    const input = pending + String(data || "");
+    let output = "";
+    let index = 0;
+    pending = "";
+
+    while (index < input.length) {
+      const match = /\x1b\](?:0|2);/.exec(input.slice(index));
+      if (!match) {
+        output += input.slice(index);
+        break;
+      }
+
+      const start = index + match.index;
+      output += input.slice(index, start);
+      const bel = input.indexOf("\x07", start);
+      const st = input.indexOf("\x1b\\", start);
+      if (bel < 0 && st < 0) {
+        pending = input.slice(start);
+        break;
+      }
+
+      if (bel < 0) index = st + 2;
+      else if (st < 0) index = bel + 1;
+      else index = st < bel ? st + 2 : bel + 1;
+    }
+
+    if (pending.length > 4096) {
+      output += pending;
+      pending = "";
+    }
+    return output;
+  };
+}
+
 function normalizePermission(value) {
   const input = String(value || "2").trim().toLowerCase();
   if (PERMISSION_MODES[input]) return PERMISSION_MODES[input];
@@ -255,6 +292,9 @@ function startCommand(options) {
       COLORTERM: process.env.COLORTERM || "truecolor",
     },
   });
+  const filterTitle = createTitleFilter();
+  const titleTimer = setInterval(() => setTerminalTitle(windowTitle), 2000);
+  setTerminalTitle(windowTitle);
 
   const heartbeat = (status = "running") => writeManagedSessionHeartbeat({
     id: sessionId,
@@ -272,8 +312,9 @@ function startCommand(options) {
   heartbeat("running");
   writeBridgeEvent({ type: "managed_start", session_id: sessionId, agent: agentName, thread_id: thread.id, pid: process.pid, pty_pid: term.pid });
 
-  term.onData((data) => process.stdout.write(data));
+  term.onData((data) => process.stdout.write(filterTitle(data)));
   term.onExit(({ exitCode, signal }) => {
+    clearInterval(titleTimer);
     heartbeat("stopped");
     removeManagedSession(sessionId);
     writeBridgeEvent({ type: "managed_exit", session_id: sessionId, agent: agentName, thread_id: thread.id, exit_code: exitCode, signal: signal || "" });
@@ -282,6 +323,7 @@ function startCommand(options) {
   });
 
   function cleanup() {
+    clearInterval(titleTimer);
     try {
       if (process.stdin.isTTY) process.stdin.setRawMode(false);
     } catch {
