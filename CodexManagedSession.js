@@ -3,6 +3,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const cp = require("child_process");
 const pty = require("@homebridge/node-pty-prebuilt-multiarch");
 
 const {
@@ -106,6 +107,44 @@ function permissionArgs(permissionMode) {
   return mode.args.slice();
 }
 
+function cmdQuote(value) {
+  return `"${String(value || "").replace(/"/g, '""')}"`;
+}
+
+function resolveCodexCommand() {
+  try {
+    const output = cp.execFileSync("where.exe", ["codex"], {
+      encoding: "utf8",
+      windowsHide: true,
+      timeout: 5000,
+    });
+    const candidates = output.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    return candidates.find((item) => item.toLowerCase().endsWith(".cmd"))
+      || candidates.find((item) => item.toLowerCase().endsWith(".exe"))
+      || candidates[0]
+      || "codex";
+  } catch {
+    return "codex";
+  }
+}
+
+function buildCodexSpawn(args) {
+  const codex = resolveCodexCommand();
+  if (process.platform === "win32") {
+    const commandLine = [cmdQuote(codex), ...args.map(cmdQuote)].join(" ");
+    return {
+      file: process.env.ComSpec || "cmd.exe",
+      args: ["/d", "/s", "/c", commandLine],
+      display: `${codex} ${args.join(" ")}`,
+    };
+  }
+  return {
+    file: codex,
+    args,
+    display: `${codex} ${args.join(" ")}`,
+  };
+}
+
 function plainInjectText(prompt) {
   return String(prompt || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
@@ -147,9 +186,11 @@ function startCommand(options) {
   console.log(`Thread: ${thread.id}`);
   console.log(`Mode: ${mode.name}`);
   console.log("Injection: send --to " + agentName + " --mode inject");
+  const spawnSpec = buildCodexSpawn(args);
+  console.log(`Command: ${spawnSpec.display}`);
   console.log("");
 
-  const term = pty.spawn("codex", args, {
+  const term = pty.spawn(spawnSpec.file, spawnSpec.args, {
     name: "xterm-256color",
     cols: process.stdout.columns || 120,
     rows: process.stdout.rows || 36,
