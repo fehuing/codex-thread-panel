@@ -1,0 +1,27 @@
+{
+  "name": "codex-thread-panel",
+  "version": "1.0.0",
+  "description": "A Windows-focused terminal UI for browsing local Codex projects and threads, opening/resuming threads, creating new threads, renaming local thread titles, archiving threads, and viewing Codex quota information from local session logs.",
+  "main": "CodexThreadBridge.js",
+  "scripts": {
+    "check": "node --check CodexThreadPanelTui.js && node --check CodexThreadBridge.js && node --check CodexManagedSession.js",
+    "panel": "node CodexThreadPanelTui.js",
+    "bridge": "node CodexThreadBridge.js",
+    "managed": "node CodexManagedSession.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fehuing/codex-thread-panel.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/fehuing/codex-thread-panel/issues"
+  },
+  "homepage": "https://github.com/fehuing/codex-thread-panel#readme",
+  "dependencies": {
+    "@homebridge/node-pty-prebuilt-multiarch": "^0.13.1"
+  }
+}

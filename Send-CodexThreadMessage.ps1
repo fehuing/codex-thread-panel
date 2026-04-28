@@ -5,7 +5,7 @@ param(
   [string]$Prompt,
   [string]$PromptFile,
   [string]$Permission = "2",
-  [ValidateSet("launch", "queue")]
+  [ValidateSet("launch", "queue", "inject", "managed")]
   [string]$Mode = "launch",
   [string]$From = "manual",
   [switch]$Stdin

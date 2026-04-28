@@ -17,6 +17,7 @@ const {
   readBridgeMessages,
   readBridgeRules,
   readBridgeStats,
+  readManagedSessions,
   readThreads,
   removeBridgeAgent,
   resolveBridgeAgent,
@@ -32,9 +33,9 @@ function usage() {
 Usage:
   node CodexThreadBridge.js list [--query TEXT] [--all] [--limit N] [--json]
   node CodexThreadBridge.js resolve --query TEXT [--json]
-  node CodexThreadBridge.js send --to AGENT --prompt TEXT [--permission 2] [--mode launch]
+  node CodexThreadBridge.js send --to AGENT --prompt TEXT [--permission 2] [--mode inject]
   node CodexThreadBridge.js send --thread-id ID --prompt TEXT [--permission 2] [--mode launch]
-  node CodexThreadBridge.js send --query TEXT --prompt-file prompt.txt [--mode launch|queue]
+  node CodexThreadBridge.js send --query TEXT --prompt-file prompt.txt [--mode launch|queue|inject]
   node CodexThreadBridge.js inbox [--thread-id ID] [--json]
   node CodexThreadBridge.js mark --message-id ID --status done
   node CodexThreadBridge.js clear [--thread-id ID] [--status queued]
@@ -43,6 +44,7 @@ Usage:
   node CodexThreadBridge.js agent remove --name AGENT
   node CodexThreadBridge.js rules show [--json]
   node CodexThreadBridge.js rules set --default-allow true|false --block-self true|false
+  node CodexThreadBridge.js managed list [--all] [--json]
   node CodexThreadBridge.js registry [--json]
   node CodexThreadBridge.js stats [--json]
 
@@ -50,8 +52,8 @@ Permission modes:
   1 Safe, 2 Normal, 3 Auto, 4 Full
 
 Notes:
-  Phase 1 launch mode opens a new Codex window with: codex resume <thread> <prompt>.
-  Queue mode only records the message locally for later PTY/ConPTY work.
+  launch opens a new Codex window. queue only records the message.
+  inject writes to a running managed PTY session started with CodexManagedSession.js.
 `);
 }
 
@@ -210,7 +212,7 @@ function sendCommand(options) {
   const thread = resolveThread(options);
   const prompt = readPrompt(options);
   const mode = String(options.mode || "launch").toLowerCase();
-  if (!["launch", "queue"].includes(mode)) fail(`Unknown mode: ${mode}`);
+  if (!["launch", "queue", "inject", "managed"].includes(mode)) fail(`Unknown mode: ${mode}`);
 
   let launched = false;
   const permission = normalizePermission(options.permission || options["permission-mode"] || "2");
@@ -221,6 +223,9 @@ function sendCommand(options) {
   if (mode === "launch") {
     launched = openThread(thread, permission, prompt, from, toAgent);
   }
+  const status = mode === "queue" || mode === "inject" || mode === "managed"
+    ? "queued"
+    : launched ? "launched" : "launch_failed";
 
   const message = writeBridgeMessage({
     from,
@@ -230,12 +235,12 @@ function sendCommand(options) {
     toTitle: thread.title,
     cwd: thread.cwd,
     mode,
-    status: mode === "queue" ? "queued" : launched ? "launched" : "launch_failed",
+    status,
     prompt,
   });
 
   const result = {
-    ok: mode === "queue" || launched,
+    ok: mode === "queue" || mode === "inject" || mode === "managed" || launched,
     message_id: message.id,
     status: message.status,
     thread_id: thread.id,
@@ -421,6 +426,20 @@ function clearCommand(options) {
   else console.log(`Messages removed: ${removed}`);
 }
 
+function managedCommand(options) {
+  const subcommand = String(options._[0] || "list").toLowerCase();
+  if (subcommand !== "list" && subcommand !== "status") fail(`Unknown managed command: ${subcommand}`);
+  const sessions = readManagedSessions(Boolean(options.all));
+  if (options.json) {
+    console.log(JSON.stringify(sessions, null, 2));
+    return;
+  }
+  for (const session of sessions) {
+    const state = session.online ? "online" : session.stale ? "stale" : session.status || "-";
+    console.log(`${state.padEnd(8)} ${String(session.agent || "-").padEnd(24)} ${session.thread_id || "-"} pid=${session.pid || "-"}`);
+  }
+}
+
 function main() {
   const [command, ...rest] = process.argv.slice(2);
   const options = parseArgs(rest);
@@ -445,6 +464,9 @@ function main() {
       break;
     case "rules":
       rulesCommand(options);
+      break;
+    case "managed":
+      managedCommand(options);
       break;
     case "inbox":
       inboxCommand(options);

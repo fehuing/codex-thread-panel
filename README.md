@@ -5,6 +5,7 @@ A Windows-focused terminal UI for browsing local Codex projects and threads, ope
 ## Run
 
 ```powershell
+npm install
 .\Start-CodexThreadPanel.cmd
 ```
 
@@ -12,6 +13,7 @@ A Windows-focused terminal UI for browsing local Codex projects and threads, ope
 
 - `CodexThreadPanelTui.js`: main Node.js TUI.
 - `CodexThreadBridge.js`: local bridge for agent aliases, message queue records, rules, and launching `codex resume`.
+- `CodexManagedSession.js`: phase-3 ConPTY-backed runner that owns a live Codex session and can inject queued prompts.
 - `Send-CodexThreadMessage.ps1`: PowerShell wrapper for the bridge; safe to call from another Codex thread.
 - `Start-CodexThreadPanel.cmd`: default launcher.
 - `Start-CodexThreadPanel-Maximized.cmd`: maximized launcher.
@@ -21,14 +23,22 @@ A Windows-focused terminal UI for browsing local Codex projects and threads, ope
 
 ## Bridge
 
-From the panel, select a thread and press `P` to enter a prompt for that thread. Phase 1 opens a new Codex window with `codex resume <thread> <prompt>` and records the message locally.
+From the panel, select a thread and press `P` to enter a prompt for that thread.
 
 Press `G` on a selected thread to assign an agent alias such as `thread-a` or `frontend-agent`.
+
+Press `M` on a selected thread to open it as a managed PTY session. Only managed sessions can receive direct injected prompts without opening another Codex window.
 
 From another Codex thread, call:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File D:\codex_chat\Send-CodexThreadMessage.ps1 -To frontend-agent -Prompt "your prompt" -Permission Normal -Mode launch -From thread-a
+```
+
+To inject into an already running managed session, use:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File D:\codex_chat\Send-CodexThreadMessage.ps1 -To frontend-agent -Prompt "your prompt" -Mode inject -From thread-a
 ```
 
 Useful bridge commands:
@@ -39,12 +49,17 @@ node .\CodexThreadBridge.js resolve --query "thread title"
 node .\CodexThreadBridge.js agent set --name frontend-agent --query "thread title"
 node .\CodexThreadBridge.js agent list
 node .\CodexThreadBridge.js send --to frontend-agent --prompt "your prompt" --from thread-a
+node .\CodexThreadBridge.js send --to frontend-agent --prompt "your prompt" --mode inject --from thread-a
 node .\CodexThreadBridge.js inbox --thread-id <thread-id>
 node .\CodexThreadBridge.js mark --message-id <message-id> --status done
 node .\CodexThreadBridge.js rules show
+node .\CodexThreadBridge.js managed list
+node .\CodexManagedSession.js start --to frontend-agent --permission Normal
 node .\CodexThreadBridge.js stats
 ```
 
 Bridge data is stored under `%USERPROFILE%\.codex\thread_panel_bridge`.
 
-Phase 2 still does not inject text into an already open terminal. `--mode launch` opens a new Codex resume window; `--mode queue` only records the message for later handling.
+`--mode launch` opens a new Codex resume window. `--mode queue` only records the message. `--mode inject` writes the prompt into a live managed PTY session; if no managed session is running, the message stays queued.
+
+Phase 3 cannot inject into old windows opened with `O` or manually opened PowerShell. Those processes are not owned by the panel. Use `M` or `CodexManagedSession.js start` for sessions that need direct injection.

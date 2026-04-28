@@ -420,6 +420,71 @@ function clearBridgeMessages(threadId, status = "") {
   return removed;
 }
 
+function bridgeManagedSessionsFile() {
+  return path.join(bridgeHome(), "managed_sessions.json");
+}
+
+function readManagedSessions(includeStale = false) {
+  const data = readJsonFile(bridgeManagedSessionsFile(), { version: 3, sessions: {} });
+  const sessions = data?.sessions && typeof data.sessions === "object" ? data.sessions : {};
+  const now = Date.now();
+  return Object.values(sessions)
+    .map((session) => {
+      const heartbeatTime = Date.parse(session.heartbeat_at || session.started_at || "");
+      const ageMs = Number.isFinite(heartbeatTime) ? now - heartbeatTime : Number.POSITIVE_INFINITY;
+      return {
+        ...session,
+        online: ageMs <= 15000 && session.status !== "stopped",
+        stale: ageMs > 15000 && session.status !== "stopped",
+        age_ms: Number.isFinite(ageMs) ? ageMs : null,
+      };
+    })
+    .filter((session) => includeStale || session.online)
+    .sort((a, b) => String(b.heartbeat_at || "").localeCompare(String(a.heartbeat_at || "")));
+}
+
+function writeManagedSessionHeartbeat(session) {
+  const id = singleLine(session.id || `${session.agent || session.thread_id || "managed"}-${process.pid}`);
+  if (!id) throw new Error("Managed session id is required.");
+  const data = readJsonFile(bridgeManagedSessionsFile(), { version: 3, sessions: {} });
+  const sessions = data?.sessions && typeof data.sessions === "object" ? data.sessions : {};
+  const previous = sessions[id] || {};
+  const now = new Date().toISOString();
+  sessions[id] = {
+    ...previous,
+    id,
+    agent: normalizeAgentName(session.agent || previous.agent || ""),
+    thread_id: singleLine(session.threadId || session.thread_id || previous.thread_id || ""),
+    title: singleLine(session.title || previous.title || ""),
+    cwd: normalizeCodexPath(session.cwd || previous.cwd || ""),
+    project: singleLine(session.project || previous.project || ""),
+    pid: Number(session.pid || previous.pid || process.pid),
+    pty_pid: Number(session.ptyPid || session.pty_pid || previous.pty_pid || 0),
+    permission: singleLine(session.permission || previous.permission || ""),
+    status: singleLine(session.status || previous.status || "running"),
+    started_at: previous.started_at || session.startedAt || session.started_at || now,
+    heartbeat_at: now,
+  };
+  writeJsonFile(bridgeManagedSessionsFile(), { version: 3, sessions });
+  return sessions[id];
+}
+
+function removeManagedSession(id) {
+  const sessionId = singleLine(id);
+  if (!sessionId) return false;
+  const data = readJsonFile(bridgeManagedSessionsFile(), { version: 3, sessions: {} });
+  const sessions = data?.sessions && typeof data.sessions === "object" ? data.sessions : {};
+  if (!sessions[sessionId]) return false;
+  sessions[sessionId] = {
+    ...sessions[sessionId],
+    status: "stopped",
+    heartbeat_at: new Date().toISOString(),
+  };
+  writeJsonFile(bridgeManagedSessionsFile(), { version: 3, sessions });
+  writeBridgeEvent({ type: "managed_stop", session_id: sessionId, agent: sessions[sessionId].agent || "", thread_id: sessions[sessionId].thread_id || "" });
+  return true;
+}
+
 function registerBridgeLaunch(launch) {
   const agentName = normalizeAgentName(launch.agentName || launch.agent_name || "");
   const record = {
@@ -459,11 +524,14 @@ function readBridgeStats() {
   const launches = readBridgeLaunches(1);
   const messages = readBridgeMessages(null, 0);
   const agents = listBridgeAgents();
+  const managedSessions = readManagedSessions(false);
   const rules = readBridgeRules();
   return {
     home: bridgeHome(),
     agentCount: agents.length,
     agents: agents.slice(0, 12),
+    managedCount: managedSessions.length,
+    managedSessions: managedSessions.slice(0, 12),
     rules,
     launchCount: readJsonLines(path.join(bridgeHome(), "launches.jsonl"), 0).length,
     messageCount: messages.length,
@@ -1084,7 +1152,7 @@ function statsLines(threads, nodes, includeArchived, search, bridgeStats) {
     { text: `Visible nodes: ${nodes.length}`, color: COLORS.gray },
     { text: `Archive filter: ${includeArchived ? "shown" : "hidden"}`, color: COLORS.gray },
     { text: `Search: ${search || "(none)"}`, color: COLORS.gray },
-    { text: `Agents: ${bridgeStats?.agentCount || 0} | rules: ${rules.default_allow ? "allow" : "deny"} default | self: ${rules.block_self_send ? "blocked" : "allowed"}`, color: COLORS.gray },
+    { text: `Agents: ${bridgeStats?.agentCount || 0} | managed: ${bridgeStats?.managedCount || 0} | self: ${rules.block_self_send ? "blocked" : "allowed"}`, color: COLORS.gray },
     { text: bridgeText, color: COLORS.gray },
   ];
 }
@@ -1112,8 +1180,9 @@ function keyLines(promptMode) {
     { text: "Enter/Right: expand or open", color: COLORS.gray },
     { text: "Left: collapse or jump to parent", color: COLORS.gray },
     { text: "O: open selected thread with permissions", color: COLORS.gray },
+    { text: "M: open managed PTY session", color: COLORS.green },
     { text: "N: new thread with permissions", color: COLORS.gray },
-    { text: "P: send prompt to selected thread", color: COLORS.green },
+    { text: "P: inject prompt to managed session", color: COLORS.green },
     { text: "G: set agent alias for selected thread", color: COLORS.green },
     { text: "D: archive selected thread", color: COLORS.yellow },
     { text: "T: rename selected thread", color: COLORS.gray },
@@ -1482,6 +1551,19 @@ function openThread(thread, permissionMode = PERMISSION_MODES["2"], initialPromp
   return ok;
 }
 
+function startManagedThread(thread, permissionMode = PERMISSION_MODES["2"]) {
+  if (!thread?.id) return false;
+  const script = path.join(__dirname, "CodexManagedSession.js");
+  if (!fs.existsSync(script)) return false;
+  const mode = permissionMode || PERMISSION_MODES["2"];
+  const agent = upsertBridgeAgent(findBridgeAgentByThread(thread.id)?.name || defaultAgentName(thread), thread, "panel-managed");
+  const commands = [
+    `Set-Location -LiteralPath ${psQuote(__dirname)}`,
+    `node ${psQuote(script)} start --thread-id ${psQuote(thread.id)} --agent ${psQuote(agent.name)} --permission ${psQuote(mode.name)}`,
+  ];
+  return startPowerShell(commands, `Managed - ${agent.name} - ${mode.name}`);
+}
+
 function newThread(cwd, permissionMode = PERMISSION_MODES["2"], initialPrompt = "新建对话线程", source = "panel") {
   if (!cwd || !fs.existsSync(cwd)) return false;
   const mode = permissionMode || PERMISSION_MODES["2"];
@@ -1528,7 +1610,7 @@ function startPromptThread(thread, permissionMode = PERMISSION_MODES["2"]) {
   if (!fs.existsSync(script)) return false;
   const mode = permissionMode || PERMISSION_MODES["2"];
   const commands = [
-    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ${psQuote(script)} -ThreadId ${psQuote(thread.id)} -Permission ${psQuote(mode.name)} -Mode ${psQuote("launch")} -From ${psQuote("panel")}`,
+    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ${psQuote(script)} -ThreadId ${psQuote(thread.id)} -Permission ${psQuote(mode.name)} -Mode ${psQuote("inject")} -From ${psQuote("panel")}`,
     "exit",
   ];
   return startPowerShell(commands, `Prompt - ${thread.project || "Thread"} - ${mode.name}`);
@@ -1568,8 +1650,14 @@ function handlePromptInput(state, key) {
       return;
     }
 
+    if (action.type === "managed" && action.thread) {
+      if (startManagedThread(action.thread, mode)) state.status = `Managed session opened with ${mode.name}: ${action.thread.title}`;
+      else state.status = "Failed to open managed session.";
+      return;
+    }
+
     if (action.type === "prompt" && action.thread) {
-      if (startPromptThread(action.thread, mode)) state.status = `Prompt input opened with ${mode.name}: ${action.thread.title}`;
+      if (startPromptThread(action.thread, mode)) state.status = `Prompt injection opened with ${mode.name}: ${action.thread.title}`;
       else state.status = "Failed to open prompt input.";
       return;
     }
@@ -1748,6 +1836,16 @@ function handleKey(state, key, renderer) {
     }
     return true;
   }
+  if (lower === "m") {
+    if (node?.type === "thread") {
+      state.promptMode = "permission";
+      state.pendingAction = { type: "managed", thread: node.thread };
+      state.status = `Choose permission mode for managed session: ${node.thread.title}`;
+    } else {
+      state.status = "Select a thread before opening a managed session.";
+    }
+    return true;
+  }
   if (lower === "p") {
     if (node?.type === "thread") {
       state.promptMode = "permission";
@@ -1889,6 +1987,7 @@ function main() {
     console.log(`RolloutTitlesVisible: ${state.threads.filter((t) => isRolloutName(t.title)).length}`);
     console.log(`BridgeHome: ${state.bridgeStats.home}`);
     console.log(`BridgeAgents: ${state.bridgeStats.agentCount}`);
+    console.log(`BridgeManaged: ${state.bridgeStats.managedCount}`);
     console.log(`BridgeMessages: ${state.bridgeStats.messageCount}`);
     console.log(`BridgeQueued: ${state.bridgeStats.queuedCount}`);
     console.log(`BridgeLaunches: ${state.bridgeStats.launchCount}`);
@@ -2008,11 +2107,14 @@ module.exports = {
   readBridgeStats,
   readLatestQuota,
   readThreads,
+  readManagedSessions,
   registerBridgeLaunch,
+  removeManagedSession,
   removeBridgeAgent,
   resolveBridgeAgent,
   updateBridgeMessageStatus,
   upsertBridgeAgent,
+  writeManagedSessionHeartbeat,
   writeBridgeEvent,
   writeBridgeMessage,
   writeBridgeRules,
