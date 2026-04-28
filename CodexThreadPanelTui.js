@@ -1608,11 +1608,12 @@ function startManagedThread(thread, permissionMode = PERMISSION_MODES["2"]) {
   if (!fs.existsSync(script)) return false;
   const mode = permissionMode || PERMISSION_MODES["2"];
   const agent = upsertBridgeAgent(findBridgeAgentByThread(thread.id)?.name || defaultAgentName(thread), thread, "panel-managed");
+  const windowTitle = `Managed - ${singleLine(thread.title) || agent.name} - ${mode.name}`;
   const commands = [
     `Set-Location -LiteralPath ${psQuote(__dirname)}`,
-    `node ${psQuote(script)} start --thread-id ${psQuote(thread.id)} --agent ${psQuote(agent.name)} --permission ${psQuote(mode.name)}${thread.model ? ` --model ${psQuote(thread.model)}` : ""}${thread.reasoningEffort ? ` --reasoning ${psQuote(thread.reasoningEffort)}` : ""}`,
+    `node ${psQuote(script)} start --thread-id ${psQuote(thread.id)} --agent ${psQuote(agent.name)} --permission ${psQuote(mode.name)} --window-title ${psQuote(windowTitle)}${thread.model ? ` --model ${psQuote(thread.model)}` : ""}${thread.reasoningEffort ? ` --reasoning ${psQuote(thread.reasoningEffort)}` : ""}`,
   ];
-  return startPowerShell(commands, `Managed - ${agent.name} - ${mode.name}`);
+  return startPowerShell(commands, windowTitle);
 }
 
 function newThread(cwd, permissionMode = PERMISSION_MODES["2"], initialPrompt = "新建对话线程", source = "panel") {

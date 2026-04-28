@@ -69,6 +69,17 @@ function fail(message, code = 1) {
   process.exit(code);
 }
 
+function singleLine(value) {
+  return String(value || "").replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
+}
+
+function setTerminalTitle(title) {
+  const clean = singleLine(title);
+  if (!clean) return;
+  process.title = clean;
+  process.stdout.write(`\x1b]0;${clean}\x07`);
+}
+
 function normalizePermission(value) {
   const input = String(value || "2").trim().toLowerCase();
   if (PERMISSION_MODES[input]) return PERMISSION_MODES[input];
@@ -222,7 +233,8 @@ function startCommand(options) {
   const args = ["resume", ...permissionArgs(mode), ...modelArgs, thread.id];
   if (options.prompt && options.prompt !== true) args.push(String(options.prompt));
 
-  process.title = `Codex Managed - ${agentName}`;
+  const windowTitle = singleLine(options["window-title"]) || `Managed - ${thread.title || agentName} - ${mode.name}`;
+  setTerminalTitle(windowTitle);
   console.log(`Managed agent: ${agentName}`);
   console.log(`Thread: ${thread.id}`);
   console.log(`Mode: ${mode.name}`);
