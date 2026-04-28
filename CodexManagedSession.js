@@ -107,7 +107,7 @@ function permissionArgs(permissionMode) {
   return mode.args.slice();
 }
 
-function cmdQuote(value) {
+function batchQuote(value) {
   return `"${String(value || "").replace(/"/g, '""')}"`;
 }
 
@@ -131,10 +131,14 @@ function resolveCodexCommand() {
 function buildCodexSpawn(args) {
   const codex = resolveCodexCommand();
   if (process.platform === "win32") {
-    const commandLine = [cmdQuote(codex), ...args.map(cmdQuote)].join(" ");
+    const dir = path.join(__dirname, ".codex-managed");
+    fs.mkdirSync(dir, { recursive: true });
+    const launcher = path.join(dir, `managed-${process.pid}-${Date.now()}.cmd`);
+    const commandLine = [batchQuote(codex), ...args.map(batchQuote)].join(" ");
+    fs.writeFileSync(launcher, `@echo off\r\n${commandLine}\r\n`, "utf8");
     return {
       file: process.env.ComSpec || "cmd.exe",
-      args: ["/d", "/s", "/c", commandLine],
+      args: ["/d", "/s", "/c", launcher],
       display: `${codex} ${args.join(" ")}`,
     };
   }
