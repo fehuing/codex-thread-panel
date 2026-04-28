@@ -153,6 +153,26 @@ function plainInjectText(prompt) {
   return String(prompt || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
+function bridgeHeaderForMessage(message, fallbackAgent, fallbackThreadId) {
+  if (String(process.env.CODEX_MANAGED_BRIDGE_HEADER || "1").toLowerCase() === "0") return "";
+  const from = message.from_agent || message.from || "unknown";
+  const to = message.to_agent || fallbackAgent || message.to_thread_id || fallbackThreadId || "unknown";
+  const messageId = message.id || "";
+  return [
+    "[Bridge message]",
+    `From: ${from}`,
+    `To: ${to}`,
+    messageId ? `Message-Id: ${messageId}` : "",
+    "",
+  ].filter((line, index, lines) => line || index === lines.length - 1).join("\n");
+}
+
+function promptForMessage(message, fallbackAgent, fallbackThreadId) {
+  const body = plainInjectText(message.prompt);
+  const header = bridgeHeaderForMessage(message, fallbackAgent, fallbackThreadId);
+  return header ? `${header}${body}` : body;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -268,7 +288,7 @@ function startCommand(options) {
       for (const message of messages) {
         seen.add(message.id);
         updateBridgeMessageStatus(message.id, "injecting");
-        await writePromptToPty(term, message.prompt);
+        await writePromptToPty(term, promptForMessage(message, agentName, thread.id));
         updateBridgeMessageStatus(message.id, "injected");
         writeBridgeEvent({ type: "managed_inject", session_id: sessionId, agent: agentName, thread_id: thread.id, message_id: message.id });
         await sleep(100);

@@ -62,4 +62,17 @@ Bridge data is stored under `%USERPROFILE%\.codex\thread_panel_bridge`.
 
 `--mode launch` opens a new Codex resume window. `--mode queue` only records the message. `--mode inject` writes the prompt into a live managed PTY session; if no managed session is running, the message stays queued.
 
+Injected messages are wrapped before they reach the target Codex session:
+
+```text
+[Bridge message]
+From: thread-a
+To: frontend-agent
+Message-Id: msg-...
+
+your prompt
+```
+
+Set `CODEX_MANAGED_BRIDGE_HEADER=0` to inject the raw prompt without this header.
+
 Phase 3 cannot inject into old windows opened with `O` or manually opened PowerShell. Those processes are not owned by the panel. Use `M` or `CodexManagedSession.js start` for sessions that need direct injection.
