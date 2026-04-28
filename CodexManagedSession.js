@@ -25,8 +25,8 @@ function usage() {
   console.log(`Codex Managed Session
 
 Usage:
-  node CodexManagedSession.js start --thread-id ID --agent AGENT [--permission Normal]
-  node CodexManagedSession.js start --to AGENT [--permission Normal]
+  node CodexManagedSession.js start --thread-id ID --agent AGENT [--permission Normal] [--model MODEL] [--reasoning EFFORT]
+  node CodexManagedSession.js start --to AGENT [--permission Normal] [--model MODEL] [--reasoning EFFORT]
   node CodexManagedSession.js list [--all] [--json]
   node CodexManagedSession.js self-test
 
@@ -105,6 +105,19 @@ function resolveThread(options) {
 function permissionArgs(permissionMode) {
   const mode = permissionMode || PERMISSION_MODES["2"];
   return mode.args.slice();
+}
+
+function threadModelArgs(thread, options) {
+  const args = [];
+  const model = options.model && options.model !== true ? String(options.model) : thread?.model || "";
+  const reasoning = options.reasoning && options.reasoning !== true
+    ? String(options.reasoning)
+    : options["reasoning-effort"] && options["reasoning-effort"] !== true
+      ? String(options["reasoning-effort"])
+      : thread?.reasoningEffort || "";
+  if (model) args.push("-m", model);
+  if (reasoning) args.push("-c", `model_reasoning_effort=${JSON.stringify(reasoning)}`);
+  return args;
 }
 
 function batchQuote(value) {
@@ -205,13 +218,15 @@ function startCommand(options) {
   const agentName = agentRecord.name;
   const sessionId = `${agentName}-${process.pid}`;
   const cwd = thread.cwd && fs.existsSync(thread.cwd) ? thread.cwd : process.cwd();
-  const args = ["resume", ...permissionArgs(mode), thread.id];
+  const modelArgs = threadModelArgs(thread, options);
+  const args = ["resume", ...permissionArgs(mode), ...modelArgs, thread.id];
   if (options.prompt && options.prompt !== true) args.push(String(options.prompt));
 
   process.title = `Codex Managed - ${agentName}`;
   console.log(`Managed agent: ${agentName}`);
   console.log(`Thread: ${thread.id}`);
   console.log(`Mode: ${mode.name}`);
+  if (modelArgs.length) console.log(`Model: ${modelArgs.join(" ")}`);
   console.log("Injection: send --to " + agentName + " --mode inject");
   const spawnSpec = buildCodexSpawn(args);
   console.log(`Command: ${spawnSpec.display}`);

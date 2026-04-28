@@ -1538,6 +1538,24 @@ function codexPermissionArgs(permissionMode) {
   return mode.args.map(psQuote).join(" ");
 }
 
+function codexThreadModelArgs(thread) {
+  const args = [];
+  if (thread?.model) args.push("-m", thread.model);
+  if (thread?.reasoningEffort) args.push("-c", `model_reasoning_effort=${JSON.stringify(thread.reasoningEffort)}`);
+  return args;
+}
+
+function codexThreadModelArgString(thread) {
+  return codexThreadModelArgs(thread).map(psQuote).join(" ");
+}
+
+function codexThreadModelLabel(thread) {
+  const parts = [];
+  if (thread?.model) parts.push(thread.model);
+  if (thread?.reasoningEffort) parts.push(thread.reasoningEffort);
+  return parts.join(" / ");
+}
+
 function createPromptFile(prompt) {
   const dir = path.join(os.tmpdir(), "codex-thread-panel");
   fs.mkdirSync(dir, { recursive: true });
@@ -1562,7 +1580,8 @@ function openThread(thread, permissionMode = PERMISSION_MODES["2"], initialPromp
     commands.push(`Set-Location -LiteralPath ${psQuote(thread.cwd)}`);
   }
   const promptArg = addPromptVariable(commands, initialPrompt);
-  commands.push(`codex resume ${codexPermissionArgs(mode)} ${psQuote(thread.id)}${promptArg ? ` ${promptArg}` : ""}`);
+  const modelArgs = codexThreadModelArgString(thread);
+  commands.push(`codex resume ${codexPermissionArgs(mode)}${modelArgs ? ` ${modelArgs}` : ""} ${psQuote(thread.id)}${promptArg ? ` ${promptArg}` : ""}`);
   const launchTitle = `Codex - ${thread.project || "Thread"} - ${mode.name}`;
   const ok = startPowerShell(commands, launchTitle);
   if (ok) {
@@ -1577,6 +1596,7 @@ function openThread(thread, permissionMode = PERMISSION_MODES["2"], initialPromp
       permission: mode.name,
       launchTitle,
       promptPreview: initialPrompt,
+      model: codexThreadModelLabel(thread),
     });
   }
   return ok;
@@ -1590,7 +1610,7 @@ function startManagedThread(thread, permissionMode = PERMISSION_MODES["2"]) {
   const agent = upsertBridgeAgent(findBridgeAgentByThread(thread.id)?.name || defaultAgentName(thread), thread, "panel-managed");
   const commands = [
     `Set-Location -LiteralPath ${psQuote(__dirname)}`,
-    `node ${psQuote(script)} start --thread-id ${psQuote(thread.id)} --agent ${psQuote(agent.name)} --permission ${psQuote(mode.name)}`,
+    `node ${psQuote(script)} start --thread-id ${psQuote(thread.id)} --agent ${psQuote(agent.name)} --permission ${psQuote(mode.name)}${thread.model ? ` --model ${psQuote(thread.model)}` : ""}${thread.reasoningEffort ? ` --reasoning ${psQuote(thread.reasoningEffort)}` : ""}`,
   ];
   return startPowerShell(commands, `Managed - ${agent.name} - ${mode.name}`);
 }

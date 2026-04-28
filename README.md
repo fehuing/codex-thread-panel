@@ -29,6 +29,8 @@ Press `G` on a selected thread to assign an agent alias such as `thread-a` or `f
 
 Press `M` on a selected thread to open it as a managed PTY session. Only managed sessions can receive direct injected prompts without opening another Codex window.
 
+When opening/resuming a thread from the panel, the launcher uses that thread's last recorded Codex model and reasoning effort if available. For example, a thread last used with `gpt-5.5 / xhigh` is resumed with those options instead of whatever the current global default model is.
+
 From another Codex thread, call:
 
 ```powershell
