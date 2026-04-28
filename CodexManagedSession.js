@@ -253,6 +253,41 @@ function messageText(payload) {
   return "";
 }
 
+const STYLE = {
+  reset: "\x1b[0m",
+  dim: "\x1b[38;5;245m",
+  dark: "\x1b[38;5;240m",
+  user: "\x1b[38;5;81m",
+  assistant: "\x1b[38;5;114m",
+  white: "\x1b[38;5;255m",
+};
+
+function stripAnsi(value) {
+  return String(value || "").replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, "");
+}
+
+function terminalWidth() {
+  return Math.max(72, Math.min(120, process.stdout.columns || 100));
+}
+
+function line(width, char = "-") {
+  return char.repeat(Math.max(1, width));
+}
+
+function formatReplayTime(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mi = String(date.getMinutes()).padStart(2, "0");
+  return `${mm}-${dd} ${hh}:${mi}`;
+}
+
+function indentText(text, prefix = "  ") {
+  return stripAnsi(text).trim().split("\n").map((row) => `${prefix}${row}`).join("\r\n");
+}
+
 function transcriptItems(thread) {
   const file = thread?.sourceFile || "";
   if (!file || !fs.existsSync(file)) return [];
@@ -283,19 +318,28 @@ function replayHistory(thread, options) {
   if (!items.length) return;
   const maxChars = Number(options["history-max-chars"] || process.env.CODEX_MANAGED_HISTORY_REPLAY_MAX_CHARS || 2000000);
   let written = 0;
-  process.stdout.write("\r\n===== Managed history replay =====\r\n");
-  process.stdout.write(`Thread: ${thread.title || thread.id}\r\n`);
-  process.stdout.write(`Messages: ${items.length}\r\n\r\n`);
+  const width = terminalWidth();
+  process.stdout.write(`\r\n${STYLE.dark}${line(width)}${STYLE.reset}\r\n`);
+  process.stdout.write(`${STYLE.white}Restored conversation history${STYLE.reset} ${STYLE.dim}${thread.title || thread.id}${STYLE.reset}\r\n`);
+  process.stdout.write(`${STYLE.dim}${items.length} messages loaded from local Codex session log${STYLE.reset}\r\n`);
+  process.stdout.write(`${STYLE.dark}${line(width)}${STYLE.reset}\r\n\r\n`);
   for (const item of items) {
-    const block = `[${item.role}] ${item.timestamp}\r\n${item.text.trim()}\r\n\r\n`;
-    if (maxChars > 0 && written + block.length > maxChars) {
-      process.stdout.write(`[history replay truncated at ${maxChars} chars]\r\n\r\n`);
+    const isUser = item.role === "User";
+    const color = isUser ? STYLE.user : STYLE.assistant;
+    const label = isUser ? "user" : "assistant";
+    const time = formatReplayTime(item.timestamp);
+    const body = indentText(item.text, "  ");
+    const plainBlock = `${label} ${time}\n${stripAnsi(item.text).trim()}\n\n`;
+    if (maxChars > 0 && written + plainBlock.length > maxChars) {
+      process.stdout.write(`${STYLE.dim}[history replay truncated at ${maxChars} chars]${STYLE.reset}\r\n\r\n`);
       break;
     }
-    process.stdout.write(block);
-    written += block.length;
+    process.stdout.write(`${color}${label}${STYLE.reset}${time ? ` ${STYLE.dim}${time}${STYLE.reset}` : ""}\r\n`);
+    process.stdout.write(`${body}\r\n\r\n`);
+    written += plainBlock.length;
   }
-  process.stdout.write("===== End history replay; live Codex session starts below =====\r\n\r\n");
+  process.stdout.write(`${STYLE.dark}${line(width)}${STYLE.reset}\r\n`);
+  process.stdout.write(`${STYLE.dim}Live managed Codex session starts below.${STYLE.reset}\r\n\r\n`);
 }
 
 function sleep(ms) {
