@@ -267,7 +267,10 @@ function startCommand(options) {
   const sessionId = `${agentName}-${process.pid}`;
   const cwd = thread.cwd && fs.existsSync(thread.cwd) ? thread.cwd : process.cwd();
   const modelArgs = threadModelArgs(thread, options);
-  const args = ["resume", ...permissionArgs(mode), ...modelArgs, thread.id];
+  const inlineMode = String(options["alt-screen"] || process.env.CODEX_MANAGED_ALT_SCREEN || "0").toLowerCase() === "0";
+  const args = ["resume", ...permissionArgs(mode), ...modelArgs];
+  if (inlineMode) args.push("--no-alt-screen");
+  args.push(thread.id);
   if (options.prompt && options.prompt !== true) args.push(String(options.prompt));
 
   const windowTitle = singleLine(options["window-title"]) || `Managed - ${thread.title || agentName} - ${mode.name}`;
@@ -276,6 +279,7 @@ function startCommand(options) {
   console.log(`Thread: ${thread.id}`);
   console.log(`Mode: ${mode.name}`);
   if (modelArgs.length) console.log(`Model: ${modelArgs.join(" ")}`);
+  console.log(`Alt screen: ${inlineMode ? "off" : "on"}`);
   console.log("Injection: send --to " + agentName + " --mode inject");
   const spawnSpec = buildCodexSpawn(args);
   console.log(`Command: ${spawnSpec.display}`);
