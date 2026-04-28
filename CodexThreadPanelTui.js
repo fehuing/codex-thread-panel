@@ -41,6 +41,127 @@ function singleLine(value) {
   return String(value).replace(/[\r\n\t]+/g, " ").replace(/\s{2,}/g, " ").trim();
 }
 
+function bridgeHome() {
+  const dir = path.join(codexHome(), "thread_panel_bridge");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function bridgeMessagesDir() {
+  const dir = path.join(bridgeHome(), "messages");
+  fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function safeFileName(value) {
+  const text = singleLine(value).replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
+  return text.slice(0, 180) || "unknown";
+}
+
+function bridgeId(prefix) {
+  return `${prefix || "item"}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function appendJsonLine(filePath, record) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.appendFileSync(filePath, `${JSON.stringify(record)}\r\n`, "utf8");
+}
+
+function readJsonLines(filePath, maxLines = 100) {
+  if (!fs.existsSync(filePath)) return [];
+  try {
+    const lines = fs.readFileSync(filePath, "utf8").split(/\r?\n/).filter((line) => line.trim());
+    const tail = maxLines > 0 ? lines.slice(-maxLines) : lines;
+    return tail.map(parseJsonLine).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function bridgeMessageFile(threadId) {
+  return path.join(bridgeMessagesDir(), `${safeFileName(threadId)}.jsonl`);
+}
+
+function writeBridgeEvent(record) {
+  const event = {
+    id: bridgeId("event"),
+    created_at: new Date().toISOString(),
+    ...record,
+  };
+  appendJsonLine(path.join(bridgeHome(), "events.jsonl"), event);
+  return event;
+}
+
+function writeBridgeMessage(message) {
+  const record = {
+    id: message.id || bridgeId("msg"),
+    created_at: new Date().toISOString(),
+    from: singleLine(message.from || "panel"),
+    to_thread_id: singleLine(message.toThreadId || message.to_thread_id || message.threadId || ""),
+    to_title: singleLine(message.toTitle || message.to_title || ""),
+    cwd: normalizeCodexPath(message.cwd || ""),
+    mode: singleLine(message.mode || "launch"),
+    status: singleLine(message.status || "queued"),
+    prompt: String(message.prompt || ""),
+  };
+  if (!record.to_thread_id) throw new Error("Missing target thread id.");
+  appendJsonLine(bridgeMessageFile(record.to_thread_id), record);
+  writeBridgeEvent({ type: "message", message_id: record.id, thread_id: record.to_thread_id, status: record.status });
+  return record;
+}
+
+function readBridgeMessages(threadId, maxLines = 50) {
+  if (threadId) return readJsonLines(bridgeMessageFile(threadId), maxLines);
+  const dir = bridgeMessagesDir();
+  let records = [];
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isFile() && entry.name.endsWith(".jsonl")) {
+        records = records.concat(readJsonLines(path.join(dir, entry.name), maxLines));
+      }
+    }
+  } catch {
+  }
+  return records
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
+    .slice(-maxLines);
+}
+
+function registerBridgeLaunch(launch) {
+  const record = {
+    id: launch.id || bridgeId("launch"),
+    created_at: new Date().toISOString(),
+    kind: singleLine(launch.kind || "resume"),
+    source: singleLine(launch.source || "panel"),
+    thread_id: singleLine(launch.threadId || launch.thread_id || ""),
+    title: singleLine(launch.title || ""),
+    cwd: normalizeCodexPath(launch.cwd || ""),
+    project: singleLine(launch.project || ""),
+    permission: singleLine(launch.permission || ""),
+    launch_title: singleLine(launch.launchTitle || launch.launch_title || ""),
+    prompt_preview: singleLine(launch.promptPreview || launch.prompt_preview || "").slice(0, 160),
+  };
+  appendJsonLine(path.join(bridgeHome(), "launches.jsonl"), record);
+  writeBridgeEvent({ type: "launch", launch_id: record.id, thread_id: record.thread_id, kind: record.kind });
+  return record;
+}
+
+function readBridgeLaunches(maxLines = 50) {
+  return readJsonLines(path.join(bridgeHome(), "launches.jsonl"), maxLines);
+}
+
+function readBridgeStats() {
+  const launches = readBridgeLaunches(1);
+  const messages = readBridgeMessages(null, 0);
+  return {
+    home: bridgeHome(),
+    launchCount: readJsonLines(path.join(bridgeHome(), "launches.jsonl"), 0).length,
+    messageCount: messages.length,
+    lastLaunch: launches[launches.length - 1] || null,
+    lastMessage: messages[messages.length - 1] || null,
+  };
+}
+
 function displayLine(value) {
   if (value === null || value === undefined) return "";
   return String(value).replace(/[\r\n\t]+/g, " ");
@@ -630,13 +751,18 @@ function detailLines(node) {
     { text: `Id: ${t.id}`, color: COLORS.dark },
     { text: `Path: ${t.cwd || "(unknown)"}`, color: COLORS.gray },
     { text: "Enter/O opens this thread.", color: COLORS.dark },
+    { text: "P sends a prompt through the local bridge.", color: COLORS.dark },
   ];
 }
 
-function statsLines(threads, nodes, includeArchived, search) {
+function statsLines(threads, nodes, includeArchived, search, bridgeStats) {
   const projects = new Set(threads.map((t) => t.cwd || "(unknown)"));
   const active = threads.filter((t) => !t.archived).length;
   const archived = threads.length - active;
+  const lastMessage = bridgeStats?.lastMessage;
+  const bridgeText = lastMessage
+    ? `Bridge: ${bridgeStats.messageCount} msgs | last ${lastMessage.status || "-"} -> ${lastMessage.to_title || lastMessage.to_thread_id || "-"}`
+    : `Bridge: ${bridgeStats?.messageCount || 0} msgs | no message`;
   return [
     { text: `CodexHome: ${codexHome()}`, color: COLORS.dark },
     { text: `Projects: ${projects.size}`, color: COLORS.gray },
@@ -644,6 +770,7 @@ function statsLines(threads, nodes, includeArchived, search) {
     { text: `Visible nodes: ${nodes.length}`, color: COLORS.gray },
     { text: `Archive filter: ${includeArchived ? "shown" : "hidden"}`, color: COLORS.gray },
     { text: `Search: ${search || "(none)"}`, color: COLORS.gray },
+    { text: bridgeText, color: COLORS.gray },
   ];
 }
 
@@ -671,6 +798,7 @@ function keyLines(promptMode) {
     { text: "Left: collapse or jump to parent", color: COLORS.gray },
     { text: "O: open selected thread with permissions", color: COLORS.gray },
     { text: "N: new thread with permissions", color: COLORS.gray },
+    { text: "P: send prompt to selected thread", color: COLORS.green },
     { text: "D: archive selected thread", color: COLORS.yellow },
     { text: "T: rename selected thread", color: COLORS.gray },
     { text: "F: open folder", color: COLORS.gray },
@@ -766,7 +894,7 @@ function makeFrame(state) {
   ]);
   const rightParts = [
     ...panel(l.rightWidth, l.detailsHeight, "Selection", detailLines(selected)),
-    ...panel(l.rightWidth, l.statsHeight, "Workspace", statsLines(state.threads, nodes, state.includeArchived, state.search)),
+    ...panel(l.rightWidth, l.statsHeight, "Workspace", statsLines(state.threads, nodes, state.includeArchived, state.search, state.bridgeStats)),
     ...panel(l.rightWidth, l.keysHeight, "Keys", keyLines(state.promptMode)),
     ...panel(l.rightWidth, l.quotaHeight, "Quota", quotaLines(state.quota)),
   ];
@@ -990,21 +1118,70 @@ function codexPermissionArgs(permissionMode) {
   return mode.args.map(psQuote).join(" ");
 }
 
-function openThread(thread, permissionMode = PERMISSION_MODES["2"]) {
+function createPromptFile(prompt) {
+  const dir = path.join(os.tmpdir(), "codex-thread-panel");
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `prompt-${Date.now()}-${Math.random().toString(16).slice(2)}.txt`);
+  fs.writeFileSync(file, `\uFEFF${String(prompt || "")}`, "utf8");
+  return file;
+}
+
+function addPromptVariable(commands, prompt) {
+  if (!String(prompt || "").trim()) return "";
+  const file = createPromptFile(prompt);
+  commands.push(`$panelPrompt = Get-Content -LiteralPath ${psQuote(file)} -Raw -Encoding UTF8`);
+  return "$panelPrompt";
+}
+
+function openThread(thread, permissionMode = PERMISSION_MODES["2"], initialPrompt = "", source = "panel") {
+  if (!thread?.id) return false;
+  const mode = permissionMode || PERMISSION_MODES["2"];
   const commands = [];
   if (thread.cwd && fs.existsSync(thread.cwd)) {
     commands.push(`Set-Location -LiteralPath ${psQuote(thread.cwd)}`);
   }
-  commands.push(`codex resume ${psQuote(thread.id)} ${codexPermissionArgs(permissionMode)}`);
-  return startPowerShell(commands, `Codex - ${thread.project || "Thread"} - ${permissionMode.name}`);
+  const promptArg = addPromptVariable(commands, initialPrompt);
+  commands.push(`codex resume ${codexPermissionArgs(mode)} ${psQuote(thread.id)}${promptArg ? ` ${promptArg}` : ""}`);
+  const launchTitle = `Codex - ${thread.project || "Thread"} - ${mode.name}`;
+  const ok = startPowerShell(commands, launchTitle);
+  if (ok) {
+    registerBridgeLaunch({
+      kind: "resume",
+      source,
+      threadId: thread.id,
+      title: thread.title,
+      cwd: thread.cwd,
+      project: thread.project,
+      permission: mode.name,
+      launchTitle,
+      promptPreview: initialPrompt,
+    });
+  }
+  return ok;
 }
 
-function newThread(cwd, permissionMode = PERMISSION_MODES["2"]) {
+function newThread(cwd, permissionMode = PERMISSION_MODES["2"], initialPrompt = "新建对话线程", source = "panel") {
   if (!cwd || !fs.existsSync(cwd)) return false;
-  return startPowerShell([
+  const mode = permissionMode || PERMISSION_MODES["2"];
+  const commands = [
     `Set-Location -LiteralPath ${psQuote(cwd)}`,
-    `codex -C ${psQuote(cwd)} ${codexPermissionArgs(permissionMode)} ${psQuote("新建对话线程")}`,
-  ], `Codex - ${projectName(cwd)} - ${permissionMode.name}`);
+  ];
+  const promptArg = addPromptVariable(commands, initialPrompt);
+  commands.push(`codex -C ${psQuote(cwd)} ${codexPermissionArgs(mode)}${promptArg ? ` ${promptArg}` : ""}`);
+  const launchTitle = `Codex - ${projectName(cwd)} - ${mode.name}`;
+  const ok = startPowerShell(commands, launchTitle);
+  if (ok) {
+    registerBridgeLaunch({
+      kind: "new",
+      source,
+      cwd,
+      project: projectName(cwd),
+      permission: mode.name,
+      launchTitle,
+      promptPreview: initialPrompt,
+    });
+  }
+  return ok;
 }
 
 function openFolder(cwd) {
@@ -1021,6 +1198,18 @@ function startRenameThread(thread) {
     `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ${psQuote(script)} -ThreadId ${psQuote(thread.id)} -CurrentTitle ${psQuote(thread.title)}`,
   ];
   return startPowerShell(commands, `Rename - ${thread.project || "Thread"}`);
+}
+
+function startPromptThread(thread, permissionMode = PERMISSION_MODES["2"]) {
+  if (!thread?.id) return false;
+  const script = path.join(__dirname, "Send-CodexThreadMessage.ps1");
+  if (!fs.existsSync(script)) return false;
+  const mode = permissionMode || PERMISSION_MODES["2"];
+  const commands = [
+    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ${psQuote(script)} -ThreadId ${psQuote(thread.id)} -Permission ${psQuote(mode.name)} -Mode ${psQuote("launch")} -From ${psQuote("panel")}`,
+    "exit",
+  ];
+  return startPowerShell(commands, `Prompt - ${thread.project || "Thread"} - ${mode.name}`);
 }
 
 function handlePromptInput(state, key) {
@@ -1054,6 +1243,12 @@ function handlePromptInput(state, key) {
     if (action.type === "open" && action.thread) {
       if (openThread(action.thread, mode)) state.status = `Opened thread with ${mode.name}: ${action.thread.title}`;
       else state.status = "Failed to open thread.";
+      return;
+    }
+
+    if (action.type === "prompt" && action.thread) {
+      if (startPromptThread(action.thread, mode)) state.status = `Prompt input opened with ${mode.name}: ${action.thread.title}`;
+      else state.status = "Failed to open prompt input.";
       return;
     }
 
@@ -1214,6 +1409,16 @@ function handleKey(state, key, renderer) {
     }
     return true;
   }
+  if (lower === "p") {
+    if (node?.type === "thread") {
+      state.promptMode = "permission";
+      state.pendingAction = { type: "prompt", thread: node.thread };
+      state.status = `Choose permission mode for prompt: ${node.thread.title}`;
+    } else {
+      state.status = "Select a thread before sending a prompt.";
+    }
+    return true;
+  }
   if (lower === "n") {
     const cwd = selectedProjectCwd(node);
     if (cwd) {
@@ -1277,6 +1482,7 @@ function handleKey(state, key, renderer) {
   if (lower === "r") {
     state.threads = readThreads();
     state.quota = readLatestQuota();
+    state.bridgeStats = readBridgeStats();
     state.selectedIndex = 0;
     state.scrollTop = 0;
     state.status = "Refreshed data.";
@@ -1306,6 +1512,7 @@ function main() {
   const state = {
     threads: readThreads(),
     quota: readLatestQuota(),
+    bridgeStats: readBridgeStats(),
     expanded: new Set(),
     includeArchived: false,
     search: "",
@@ -1328,8 +1535,9 @@ function main() {
     console.log(`Projects: ${projects.size}`);
     console.log(`Quota: ${state.quota?.rate ? `${state.quota.rate.plan_type || "-"} ${safePercent(state.quota.rate.primary?.used_percent)}%/${safePercent(state.quota.rate.secondary?.used_percent)}%` : "not found"}`);
     console.log(`RolloutTitlesVisible: ${state.threads.filter((t) => isRolloutName(t.title)).length}`);
-    const overrideProbe = state.threads.find((t) => t.id === "019dc5a6-6acc-7f30-8d1b-690ab326fb40");
-    if (overrideProbe) console.log(`OverrideProbeTitle: ${overrideProbe.title}`);
+    console.log(`BridgeHome: ${state.bridgeStats.home}`);
+    console.log(`BridgeMessages: ${state.bridgeStats.messageCount}`);
+    console.log(`BridgeLaunches: ${state.bridgeStats.launchCount}`);
     return;
   }
 
@@ -1357,6 +1565,7 @@ function main() {
   process.stdin.setEncoding("utf8");
 
   let lastQuotaRead = 0;
+  let lastBridgeRead = 0;
   let lastColumns = process.stdout.columns;
   let lastRows = process.stdout.rows;
 
@@ -1392,6 +1601,10 @@ function main() {
       state.quota = readLatestQuota();
       lastQuotaRead = Date.now();
     }
+    if (Date.now() - lastBridgeRead > 5000) {
+      state.bridgeStats = readBridgeStats();
+      lastBridgeRead = Date.now();
+    }
     render();
   }, 250);
 
@@ -1422,4 +1635,23 @@ function splitKeys(chunk) {
   return keys;
 }
 
-main();
+module.exports = {
+  PERMISSION_MODES,
+  bridgeHome,
+  codexHome,
+  newThread,
+  openThread,
+  projectName,
+  readBridgeLaunches,
+  readBridgeMessages,
+  readBridgeStats,
+  readLatestQuota,
+  readThreads,
+  registerBridgeLaunch,
+  writeBridgeEvent,
+  writeBridgeMessage,
+};
+
+if (require.main === module) {
+  main();
+}

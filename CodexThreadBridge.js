@@ -1,0 +1,282 @@
+#!/usr/bin/env node
+"use strict";
+
+const fs = require("fs");
+const path = require("path");
+
+const {
+  PERMISSION_MODES,
+  bridgeHome,
+  openThread,
+  readBridgeLaunches,
+  readBridgeMessages,
+  readBridgeStats,
+  readThreads,
+  writeBridgeMessage,
+} = require("./CodexThreadPanelTui.js");
+
+function usage() {
+  console.log(`Codex Thread Bridge
+
+Usage:
+  node CodexThreadBridge.js list [--query TEXT] [--all] [--limit N] [--json]
+  node CodexThreadBridge.js resolve --query TEXT [--json]
+  node CodexThreadBridge.js send --thread-id ID --prompt TEXT [--permission 2] [--mode launch]
+  node CodexThreadBridge.js send --query TEXT --prompt-file prompt.txt [--mode launch|queue]
+  node CodexThreadBridge.js inbox [--thread-id ID] [--json]
+  node CodexThreadBridge.js registry [--json]
+  node CodexThreadBridge.js stats [--json]
+
+Permission modes:
+  1 Safe, 2 Normal, 3 Auto, 4 Full
+
+Notes:
+  Phase 1 launch mode opens a new Codex window with: codex resume <thread> <prompt>.
+  Queue mode only records the message locally for later PTY/ConPTY work.
+`);
+}
+
+function parseArgs(argv) {
+  const aliases = {
+    a: "all",
+    f: "prompt-file",
+    j: "json",
+    m: "mode",
+    p: "prompt",
+    q: "query",
+    t: "thread-id",
+  };
+  const options = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg.startsWith("--")) {
+      const raw = arg.slice(2);
+      const eq = raw.indexOf("=");
+      const key = eq >= 0 ? raw.slice(0, eq) : raw;
+      if (eq >= 0) {
+        options[key] = raw.slice(eq + 1);
+      } else if (argv[i + 1] && !argv[i + 1].startsWith("-")) {
+        options[key] = argv[++i];
+      } else {
+        options[key] = true;
+      }
+    } else if (arg.startsWith("-") && arg.length > 1) {
+      const key = aliases[arg.slice(1)] || arg.slice(1);
+      if (argv[i + 1] && !argv[i + 1].startsWith("-")) {
+        options[key] = argv[++i];
+      } else {
+        options[key] = true;
+      }
+    } else {
+      options._.push(arg);
+    }
+  }
+  return options;
+}
+
+function fail(message, code = 1) {
+  console.error(message);
+  process.exit(code);
+}
+
+function truncate(value, length) {
+  const text = String(value || "").replace(/[\r\n\t]+/g, " ").trim();
+  return text.length > length ? `${text.slice(0, Math.max(0, length - 3))}...` : text;
+}
+
+function normalizePermission(value) {
+  const input = String(value || "2").trim().toLowerCase();
+  if (PERMISSION_MODES[input]) return PERMISSION_MODES[input];
+  for (const mode of Object.values(PERMISSION_MODES)) {
+    if (mode.name.toLowerCase() === input || mode.label.toLowerCase() === input) return mode;
+  }
+  fail(`Unknown permission mode: ${value}`);
+}
+
+function filterThreads(threads, query) {
+  const q = String(query || "").trim().toLowerCase();
+  if (!q) return threads;
+  return threads.filter((thread) => {
+    const haystack = `${thread.id}\n${thread.title}\n${thread.project}\n${thread.cwd}`.toLowerCase();
+    return haystack.includes(q);
+  });
+}
+
+function resolveThread(options) {
+  const threads = readThreads();
+  const id = String(options["thread-id"] || options.id || "").trim();
+  if (id) {
+    const exact = threads.find((thread) => thread.id === id);
+    if (exact) return exact;
+    const prefixed = threads.filter((thread) => thread.id.startsWith(id));
+    if (prefixed.length === 1) return prefixed[0];
+    if (prefixed.length > 1) fail(`Thread id prefix is ambiguous: ${id}`);
+    fail(`Thread id not found: ${id}`);
+  }
+
+  const query = String(options.query || "").trim();
+  if (!query) fail("Missing --thread-id or --query.");
+  const matches = filterThreads(threads, query);
+  if (!matches.length) fail(`No thread matched query: ${query}`);
+  return matches[0];
+}
+
+function readPrompt(options) {
+  if (options["prompt-file"]) {
+    return fs.readFileSync(path.resolve(String(options["prompt-file"])), "utf8").replace(/^\uFEFF/, "");
+  }
+  if (options.stdin) {
+    return fs.readFileSync(0, "utf8").replace(/^\uFEFF/, "");
+  }
+  if (options.prompt !== undefined && options.prompt !== true) {
+    return String(options.prompt);
+  }
+  fail("Missing prompt. Use --prompt TEXT, --prompt-file FILE, or --stdin.");
+}
+
+function printThread(thread, json) {
+  if (json) {
+    console.log(JSON.stringify(thread, null, 2));
+    return;
+  }
+  console.log(`Thread: ${thread.id}`);
+  console.log(`Title:  ${thread.title}`);
+  console.log(`Project:${thread.project}`);
+  console.log(`Path:   ${thread.cwd || "-"}`);
+}
+
+function listCommand(options) {
+  const includeArchived = Boolean(options.all || options.archived);
+  const limit = Number(options.limit || 0);
+  let threads = filterThreads(readThreads(), options.query)
+    .filter((thread) => includeArchived || !thread.archived);
+  if (limit > 0) threads = threads.slice(0, limit);
+
+  if (options.json) {
+    console.log(JSON.stringify(threads, null, 2));
+    return;
+  }
+
+  for (const thread of threads) {
+    const archived = thread.archived ? "A" : " ";
+    console.log(`${archived} ${thread.id}  ${truncate(thread.project, 18).padEnd(18)}  ${truncate(thread.title, 70)}`);
+  }
+}
+
+function resolveCommand(options) {
+  printThread(resolveThread(options), Boolean(options.json));
+}
+
+function sendCommand(options) {
+  const thread = resolveThread(options);
+  const prompt = readPrompt(options);
+  const mode = String(options.mode || "launch").toLowerCase();
+  if (!["launch", "queue"].includes(mode)) fail(`Unknown mode: ${mode}`);
+
+  let launched = false;
+  const permission = normalizePermission(options.permission || options["permission-mode"] || "2");
+  if (mode === "launch") {
+    launched = openThread(thread, permission, prompt, options.from || "bridge");
+  }
+
+  const message = writeBridgeMessage({
+    from: options.from || "bridge",
+    toThreadId: thread.id,
+    toTitle: thread.title,
+    cwd: thread.cwd,
+    mode,
+    status: mode === "queue" ? "queued" : launched ? "launched" : "launch_failed",
+    prompt,
+  });
+
+  const result = {
+    ok: mode === "queue" || launched,
+    message_id: message.id,
+    status: message.status,
+    thread_id: thread.id,
+    title: thread.title,
+    mode,
+    bridge_home: bridgeHome(),
+  };
+
+  if (options.json) console.log(JSON.stringify(result, null, 2));
+  else {
+    console.log(`Status: ${result.status}`);
+    console.log(`Message: ${result.message_id}`);
+    console.log(`Thread: ${result.thread_id}`);
+    console.log(`Title: ${result.title}`);
+  }
+
+  if (!result.ok) process.exit(1);
+}
+
+function inboxCommand(options) {
+  const threadId = options["thread-id"] || options.id || "";
+  const messages = readBridgeMessages(threadId, Number(options.limit || 50));
+  if (options.json) {
+    console.log(JSON.stringify(messages, null, 2));
+    return;
+  }
+  for (const message of messages) {
+    console.log(`${message.created_at} ${message.status} ${message.to_thread_id} ${truncate(message.prompt, 90)}`);
+  }
+}
+
+function registryCommand(options) {
+  const launches = readBridgeLaunches(Number(options.limit || 50));
+  if (options.json) {
+    console.log(JSON.stringify(launches, null, 2));
+    return;
+  }
+  for (const launch of launches) {
+    console.log(`${launch.created_at} ${launch.kind} ${launch.thread_id || "-"} ${truncate(launch.launch_title, 80)}`);
+  }
+}
+
+function statsCommand(options) {
+  const stats = readBridgeStats();
+  if (options.json) {
+    console.log(JSON.stringify(stats, null, 2));
+    return;
+  }
+  console.log(`BridgeHome: ${stats.home}`);
+  console.log(`Messages: ${stats.messageCount}`);
+  console.log(`Launches: ${stats.launchCount}`);
+  if (stats.lastMessage) console.log(`LastMessage: ${stats.lastMessage.status} -> ${stats.lastMessage.to_thread_id}`);
+  if (stats.lastLaunch) console.log(`LastLaunch: ${stats.lastLaunch.kind} -> ${stats.lastLaunch.thread_id || stats.lastLaunch.cwd || "-"}`);
+}
+
+function main() {
+  const [command, ...rest] = process.argv.slice(2);
+  const options = parseArgs(rest);
+  switch (String(command || "help").toLowerCase()) {
+    case "help":
+    case "--help":
+    case "-h":
+      usage();
+      break;
+    case "list":
+      listCommand(options);
+      break;
+    case "resolve":
+      resolveCommand(options);
+      break;
+    case "send":
+      sendCommand(options);
+      break;
+    case "inbox":
+      inboxCommand(options);
+      break;
+    case "registry":
+      registryCommand(options);
+      break;
+    case "stats":
+      statsCommand(options);
+      break;
+    default:
+      usage();
+      fail(`Unknown command: ${command || ""}`);
+  }
+}
+
+main();
