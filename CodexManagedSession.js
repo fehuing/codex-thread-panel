@@ -153,14 +153,17 @@ function plainInjectText(prompt) {
   return String(prompt || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 }
 
-function writePromptToPty(term, prompt) {
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function writePromptToPty(term, prompt) {
   const text = plainInjectText(prompt);
   if (!text.trim()) return;
-  if (text.includes("\n")) {
-    term.write(`\x1b[200~${text}\x1b[201~\r`);
-  } else {
-    term.write(`${text}\r`);
-  }
+  const submitDelayMs = Number(process.env.CODEX_MANAGED_SUBMIT_DELAY_MS || 200);
+  term.write(`\x1b[200~${text}\x1b[201~`);
+  await sleep(Math.max(25, submitDelayMs));
+  term.write("\r");
 }
 
 function listCommand(options) {
@@ -250,20 +253,28 @@ function startCommand(options) {
   });
 
   const seen = new Set();
+  let injecting = false;
   setInterval(() => heartbeat("running"), 3000);
-  setInterval(() => {
+  setInterval(async () => {
+    if (injecting) return;
+    injecting = true;
     const messages = readBridgeMessages(thread.id, 200)
       .filter((message) => !seen.has(message.id))
       .filter((message) => message.status === "queued")
       .filter((message) => ["inject", "managed"].includes(String(message.mode || "").toLowerCase()))
       .filter((message) => !message.to_agent || message.to_agent === agentName || message.to_thread_id === thread.id);
 
-    for (const message of messages) {
-      seen.add(message.id);
-      updateBridgeMessageStatus(message.id, "injecting");
-      writePromptToPty(term, message.prompt);
-      updateBridgeMessageStatus(message.id, "injected");
-      writeBridgeEvent({ type: "managed_inject", session_id: sessionId, agent: agentName, thread_id: thread.id, message_id: message.id });
+    try {
+      for (const message of messages) {
+        seen.add(message.id);
+        updateBridgeMessageStatus(message.id, "injecting");
+        await writePromptToPty(term, message.prompt);
+        updateBridgeMessageStatus(message.id, "injected");
+        writeBridgeEvent({ type: "managed_inject", session_id: sessionId, agent: agentName, thread_id: thread.id, message_id: message.id });
+        await sleep(100);
+      }
+    } finally {
+      injecting = false;
     }
   }, 700);
 
