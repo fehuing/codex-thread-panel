@@ -7,12 +7,23 @@ const path = require("path");
 const {
   PERMISSION_MODES,
   bridgeHome,
+  checkBridgeSendAllowed,
+  clearBridgeMessages,
+  defaultAgentName,
+  findBridgeAgentByThread,
+  listBridgeAgents,
   openThread,
   readBridgeLaunches,
   readBridgeMessages,
+  readBridgeRules,
   readBridgeStats,
   readThreads,
+  removeBridgeAgent,
+  resolveBridgeAgent,
+  updateBridgeMessageStatus,
+  upsertBridgeAgent,
   writeBridgeMessage,
+  writeBridgeRules,
 } = require("./CodexThreadPanelTui.js");
 
 function usage() {
@@ -21,9 +32,17 @@ function usage() {
 Usage:
   node CodexThreadBridge.js list [--query TEXT] [--all] [--limit N] [--json]
   node CodexThreadBridge.js resolve --query TEXT [--json]
+  node CodexThreadBridge.js send --to AGENT --prompt TEXT [--permission 2] [--mode launch]
   node CodexThreadBridge.js send --thread-id ID --prompt TEXT [--permission 2] [--mode launch]
   node CodexThreadBridge.js send --query TEXT --prompt-file prompt.txt [--mode launch|queue]
   node CodexThreadBridge.js inbox [--thread-id ID] [--json]
+  node CodexThreadBridge.js mark --message-id ID --status done
+  node CodexThreadBridge.js clear [--thread-id ID] [--status queued]
+  node CodexThreadBridge.js agent list [--json]
+  node CodexThreadBridge.js agent set --name AGENT --thread-id ID
+  node CodexThreadBridge.js agent remove --name AGENT
+  node CodexThreadBridge.js rules show [--json]
+  node CodexThreadBridge.js rules set --default-allow true|false --block-self true|false
   node CodexThreadBridge.js registry [--json]
   node CodexThreadBridge.js stats [--json]
 
@@ -45,6 +64,7 @@ function parseArgs(argv) {
     p: "prompt",
     q: "query",
     t: "thread-id",
+    n: "name",
   };
   const options = { _: [] };
   for (let i = 0; i < argv.length; i++) {
@@ -104,6 +124,23 @@ function filterThreads(threads, query) {
 
 function resolveThread(options) {
   const threads = readThreads();
+  const to = String(options.to || options.agent || "").trim();
+  if (to) {
+    const agent = resolveBridgeAgent(to);
+    if (!agent) fail(`Agent not found: ${to}`);
+    const thread = threads.find((item) => item.id === agent.thread_id);
+    return thread || {
+      id: agent.thread_id,
+      title: agent.title || agent.name,
+      cwd: agent.cwd || "",
+      project: agent.project || "",
+      archived: false,
+      updatedText: "",
+      model: "",
+      tokensUsed: 0,
+      agent: agent.name,
+    };
+  }
   const id = String(options["thread-id"] || options.id || "").trim();
   if (id) {
     const exact = threads.find((thread) => thread.id === id);
@@ -143,6 +180,7 @@ function printThread(thread, json) {
   console.log(`Title:  ${thread.title}`);
   console.log(`Project:${thread.project}`);
   console.log(`Path:   ${thread.cwd || "-"}`);
+  if (thread.agent) console.log(`Agent:  ${thread.agent}`);
 }
 
 function listCommand(options) {
@@ -159,7 +197,8 @@ function listCommand(options) {
 
   for (const thread of threads) {
     const archived = thread.archived ? "A" : " ";
-    console.log(`${archived} ${thread.id}  ${truncate(thread.project, 18).padEnd(18)}  ${truncate(thread.title, 70)}`);
+    const agent = findBridgeAgentByThread(thread.id)?.name || "-";
+    console.log(`${archived} ${thread.id}  ${truncate(agent, 18).padEnd(18)}  ${truncate(thread.project, 18).padEnd(18)}  ${truncate(thread.title, 60)}`);
   }
 }
 
@@ -175,12 +214,18 @@ function sendCommand(options) {
 
   let launched = false;
   const permission = normalizePermission(options.permission || options["permission-mode"] || "2");
+  const from = options.from || "bridge";
+  const toAgent = options.to ? resolveBridgeAgent(options.to)?.name || "" : findBridgeAgentByThread(thread.id)?.name || "";
+  const decision = checkBridgeSendAllowed({ from, to: toAgent || thread.id, prompt });
+  if (!decision.allowed) fail(`Bridge send blocked: ${decision.reason}`);
   if (mode === "launch") {
-    launched = openThread(thread, permission, prompt, options.from || "bridge");
+    launched = openThread(thread, permission, prompt, from, toAgent);
   }
 
   const message = writeBridgeMessage({
-    from: options.from || "bridge",
+    from,
+    fromAgent: from,
+    toAgent,
     toThreadId: thread.id,
     toTitle: thread.title,
     cwd: thread.cwd,
@@ -194,6 +239,7 @@ function sendCommand(options) {
     message_id: message.id,
     status: message.status,
     thread_id: thread.id,
+    to_agent: toAgent || "",
     title: thread.title,
     mode,
     bridge_home: bridgeHome(),
@@ -204,6 +250,7 @@ function sendCommand(options) {
     console.log(`Status: ${result.status}`);
     console.log(`Message: ${result.message_id}`);
     console.log(`Thread: ${result.thread_id}`);
+    if (result.to_agent) console.log(`Agent: ${result.to_agent}`);
     console.log(`Title: ${result.title}`);
   }
 
@@ -240,10 +287,138 @@ function statsCommand(options) {
     return;
   }
   console.log(`BridgeHome: ${stats.home}`);
+  console.log(`Agents: ${stats.agentCount}`);
   console.log(`Messages: ${stats.messageCount}`);
+  console.log(`Queued: ${stats.queuedCount}`);
   console.log(`Launches: ${stats.launchCount}`);
   if (stats.lastMessage) console.log(`LastMessage: ${stats.lastMessage.status} -> ${stats.lastMessage.to_thread_id}`);
   if (stats.lastLaunch) console.log(`LastLaunch: ${stats.lastLaunch.kind} -> ${stats.lastLaunch.thread_id || stats.lastLaunch.cwd || "-"}`);
+}
+
+function parseBoolean(value, fallback) {
+  if (value === undefined || value === null || value === true) return fallback;
+  const text = String(value).trim().toLowerCase();
+  if (["1", "true", "yes", "on", "allow"].includes(text)) return true;
+  if (["0", "false", "no", "off", "deny", "block"].includes(text)) return false;
+  return fallback;
+}
+
+function agentCommand(options) {
+  const subcommand = String(options._[0] || "list").toLowerCase();
+  if (subcommand === "list") {
+    const agents = listBridgeAgents();
+    if (options.json) {
+      console.log(JSON.stringify(agents, null, 2));
+      return;
+    }
+    for (const agent of agents) {
+      console.log(`${agent.name.padEnd(24)} ${agent.thread_id}  ${truncate(agent.project, 18).padEnd(18)} ${truncate(agent.title, 60)}`);
+    }
+    return;
+  }
+
+  if (subcommand === "show") {
+    const agent = resolveBridgeAgent(options.name || options.to || options._[1]);
+    if (!agent) fail(`Agent not found: ${options.name || options.to || options._[1] || ""}`);
+    if (options.json) console.log(JSON.stringify(agent, null, 2));
+    else {
+      console.log(`Agent: ${agent.name}`);
+      console.log(`Thread: ${agent.thread_id}`);
+      console.log(`Title: ${agent.title || "-"}`);
+      console.log(`Project: ${agent.project || "-"}`);
+      console.log(`Path: ${agent.cwd || "-"}`);
+    }
+    return;
+  }
+
+  if (subcommand === "set") {
+    const thread = resolveThread(options);
+    const name = options.name || defaultAgentName(thread);
+    const agent = upsertBridgeAgent(name, thread, options.from || "bridge");
+    if (options.json) console.log(JSON.stringify(agent, null, 2));
+    else console.log(`Agent set: ${agent.name} -> ${agent.thread_id}`);
+    return;
+  }
+
+  if (subcommand === "remove" || subcommand === "rm") {
+    const name = options.name || options._[1];
+    if (!name) fail("Missing --name.");
+    const ok = removeBridgeAgent(name);
+    if (options.json) console.log(JSON.stringify({ ok, name }, null, 2));
+    else console.log(ok ? `Agent removed: ${name}` : `Agent not found: ${name}`);
+    if (!ok) process.exit(1);
+    return;
+  }
+
+  fail(`Unknown agent command: ${subcommand}`);
+}
+
+function rulesCommand(options) {
+  const subcommand = String(options._[0] || "show").toLowerCase();
+  const rules = readBridgeRules();
+  if (subcommand === "show") {
+    if (options.json) console.log(JSON.stringify(rules, null, 2));
+    else {
+      console.log(`default_allow: ${rules.default_allow}`);
+      console.log(`block_self_send: ${rules.block_self_send}`);
+      console.log(`max_prompt_chars: ${rules.max_prompt_chars}`);
+      console.log(`allowed: ${rules.allowed.length}`);
+      console.log(`blocked: ${rules.blocked.length}`);
+    }
+    return;
+  }
+
+  if (subcommand === "set") {
+    const next = { ...rules };
+    if (options["default-allow"] !== undefined) next.default_allow = parseBoolean(options["default-allow"], next.default_allow);
+    if (options["block-self"] !== undefined) next.block_self_send = parseBoolean(options["block-self"], next.block_self_send);
+    if (options["max-prompt-chars"] !== undefined) next.max_prompt_chars = Number(options["max-prompt-chars"]) || next.max_prompt_chars;
+    const saved = writeBridgeRules(next);
+    if (options.json) console.log(JSON.stringify(saved, null, 2));
+    else console.log("Rules updated.");
+    return;
+  }
+
+  if (subcommand === "allow" || subcommand === "block") {
+    const pair = { from: options.from || "*", to: options.to || "*" };
+    const listName = subcommand === "allow" ? "allowed" : "blocked";
+    const next = { ...rules, [listName]: [...rules[listName], pair] };
+    const saved = writeBridgeRules(next);
+    if (options.json) console.log(JSON.stringify(saved, null, 2));
+    else console.log(`Rule added to ${listName}: ${pair.from} -> ${pair.to}`);
+    return;
+  }
+
+  if (subcommand === "clear") {
+    const listName = String(options.list || "blocked").toLowerCase();
+    if (!["allowed", "blocked"].includes(listName)) fail("Use --list allowed or --list blocked.");
+    const next = { ...rules, [listName]: [] };
+    const saved = writeBridgeRules(next);
+    if (options.json) console.log(JSON.stringify(saved, null, 2));
+    else console.log(`Rules cleared: ${listName}`);
+    return;
+  }
+
+  fail(`Unknown rules command: ${subcommand}`);
+}
+
+function markCommand(options) {
+  const messageId = options["message-id"] || options.id || options._[0];
+  const status = options.status || options._[1] || "done";
+  if (!messageId) fail("Missing --message-id.");
+  const message = updateBridgeMessageStatus(messageId, status);
+  if (options.json) console.log(JSON.stringify({ ok: Boolean(message), message }, null, 2));
+  else console.log(message ? `Message marked: ${message.id} -> ${message.status}` : `Message not found: ${messageId}`);
+  if (!message) process.exit(1);
+}
+
+function clearCommand(options) {
+  if (!options.all && !options["thread-id"] && !options.id && !options.status) {
+    fail("Refusing to clear every message without --all, --thread-id, or --status.");
+  }
+  const removed = clearBridgeMessages(options["thread-id"] || options.id || "", options.status || "");
+  if (options.json) console.log(JSON.stringify({ removed }, null, 2));
+  else console.log(`Messages removed: ${removed}`);
 }
 
 function main() {
@@ -264,8 +439,21 @@ function main() {
     case "send":
       sendCommand(options);
       break;
+    case "agent":
+    case "agents":
+      agentCommand(options);
+      break;
+    case "rules":
+      rulesCommand(options);
+      break;
     case "inbox":
       inboxCommand(options);
+      break;
+    case "mark":
+      markCommand(options);
+      break;
+    case "clear":
+      clearCommand(options);
       break;
     case "registry":
       registryCommand(options);

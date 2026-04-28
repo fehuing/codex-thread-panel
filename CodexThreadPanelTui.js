@@ -78,8 +78,226 @@ function readJsonLines(filePath, maxLines = 100) {
   }
 }
 
+function readJsonFile(filePath, fallback) {
+  if (!fs.existsSync(filePath)) return fallback;
+  try {
+    const raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
+    return raw.trim() ? JSON.parse(raw) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeJsonFile(filePath, data) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\r\n`, "utf8");
+}
+
 function bridgeMessageFile(threadId) {
   return path.join(bridgeMessagesDir(), `${safeFileName(threadId)}.jsonl`);
+}
+
+function bridgeAgentsFile() {
+  return path.join(bridgeHome(), "agents.json");
+}
+
+function bridgeRulesFile() {
+  return path.join(bridgeHome(), "rules.json");
+}
+
+function normalizeAgentName(value) {
+  const text = singleLine(value).toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "");
+  return text.slice(0, 64);
+}
+
+function defaultAgentName(thread) {
+  const project = normalizeAgentName(thread?.project || projectName(thread?.cwd || "") || "agent") || "agent";
+  const shortId = singleLine(thread?.id || "").slice(0, 8).toLowerCase() || Math.random().toString(16).slice(2, 10);
+  return normalizeAgentName(`${project}-${shortId}`) || `agent-${shortId}`;
+}
+
+function emptyAgentRegistry() {
+  return {
+    version: 2,
+    agents: {},
+    threads: {},
+  };
+}
+
+function readBridgeAgents() {
+  const data = readJsonFile(bridgeAgentsFile(), emptyAgentRegistry());
+  const registry = {
+    version: 2,
+    agents: data?.agents && typeof data.agents === "object" ? data.agents : {},
+    threads: data?.threads && typeof data.threads === "object" ? data.threads : {},
+  };
+  for (const [name, agent] of Object.entries(registry.agents)) {
+    const normalized = normalizeAgentName(name);
+    if (!normalized || normalized !== name) {
+      delete registry.agents[name];
+      if (normalized) registry.agents[normalized] = { ...agent, name: normalized };
+    }
+  }
+  registry.threads = {};
+  for (const [name, agent] of Object.entries(registry.agents)) {
+    if (agent?.thread_id) registry.threads[agent.thread_id] = name;
+  }
+  return registry;
+}
+
+function writeBridgeAgents(registry) {
+  const next = {
+    version: 2,
+    agents: registry?.agents || {},
+    threads: registry?.threads || {},
+  };
+  writeJsonFile(bridgeAgentsFile(), next);
+  return next;
+}
+
+function upsertBridgeAgent(name, thread, source = "panel") {
+  const agentName = normalizeAgentName(name) || defaultAgentName(thread);
+  if (!agentName || !thread?.id) throw new Error("Agent name and thread id are required.");
+  const registry = readBridgeAgents();
+  const now = new Date().toISOString();
+  const previous = registry.agents[agentName] || {};
+  const record = {
+    name: agentName,
+    thread_id: thread.id,
+    title: singleLine(thread.title || previous.title || ""),
+    cwd: normalizeCodexPath(thread.cwd || previous.cwd || ""),
+    project: singleLine(thread.project || previous.project || projectName(thread.cwd || "")),
+    source: singleLine(source || previous.source || "panel"),
+    created_at: previous.created_at || now,
+    updated_at: now,
+    last_launch_at: previous.last_launch_at || "",
+    last_message_at: previous.last_message_at || "",
+    launch_count: Number(previous.launch_count || 0),
+    message_count: Number(previous.message_count || 0),
+  };
+  for (const [existingName, existing] of Object.entries(registry.agents)) {
+    if (existingName !== agentName && existing?.thread_id === thread.id) {
+      delete registry.agents[existingName];
+    }
+  }
+  registry.agents[agentName] = record;
+  registry.threads = {};
+  for (const [existingName, existing] of Object.entries(registry.agents)) {
+    if (existing?.thread_id) registry.threads[existing.thread_id] = existingName;
+  }
+  writeBridgeAgents(registry);
+  writeBridgeEvent({ type: "agent_upsert", agent: agentName, thread_id: thread.id, source });
+  return record;
+}
+
+function removeBridgeAgent(name) {
+  const agentName = normalizeAgentName(name);
+  if (!agentName) return false;
+  const registry = readBridgeAgents();
+  const existing = registry.agents[agentName];
+  if (!existing) return false;
+  delete registry.agents[agentName];
+  registry.threads = {};
+  for (const [existingName, agent] of Object.entries(registry.agents)) {
+    if (agent?.thread_id) registry.threads[agent.thread_id] = existingName;
+  }
+  writeBridgeAgents(registry);
+  writeBridgeEvent({ type: "agent_remove", agent: agentName, thread_id: existing.thread_id || "" });
+  return true;
+}
+
+function findBridgeAgentByThread(threadId) {
+  const registry = readBridgeAgents();
+  const name = registry.threads[singleLine(threadId)];
+  return name ? registry.agents[name] || null : null;
+}
+
+function resolveBridgeAgent(name) {
+  const agentName = normalizeAgentName(name);
+  if (!agentName) return null;
+  const registry = readBridgeAgents();
+  return registry.agents[agentName] || null;
+}
+
+function listBridgeAgents() {
+  return Object.values(readBridgeAgents().agents || {})
+    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")) || String(a.name).localeCompare(String(b.name)));
+}
+
+function touchBridgeAgent(agentName, changes) {
+  const name = normalizeAgentName(agentName);
+  if (!name) return null;
+  const registry = readBridgeAgents();
+  const agent = registry.agents[name];
+  if (!agent) return null;
+  registry.agents[name] = {
+    ...agent,
+    ...changes,
+    updated_at: new Date().toISOString(),
+  };
+  writeBridgeAgents(registry);
+  return registry.agents[name];
+}
+
+function defaultBridgeRules() {
+  return {
+    version: 2,
+    default_allow: true,
+    block_self_send: true,
+    max_prompt_chars: 20000,
+    allowed: [],
+    blocked: [],
+  };
+}
+
+function readBridgeRules() {
+  const data = readJsonFile(bridgeRulesFile(), defaultBridgeRules());
+  return {
+    ...defaultBridgeRules(),
+    ...(data || {}),
+    allowed: Array.isArray(data?.allowed) ? data.allowed : [],
+    blocked: Array.isArray(data?.blocked) ? data.blocked : [],
+  };
+}
+
+function writeBridgeRules(rules) {
+  const next = {
+    ...defaultBridgeRules(),
+    ...(rules || {}),
+    allowed: Array.isArray(rules?.allowed) ? rules.allowed : [],
+    blocked: Array.isArray(rules?.blocked) ? rules.blocked : [],
+  };
+  writeJsonFile(bridgeRulesFile(), next);
+  writeBridgeEvent({ type: "rules_write", default_allow: Boolean(next.default_allow), block_self_send: Boolean(next.block_self_send) });
+  return next;
+}
+
+function ruleMatches(rule, from, to) {
+  if (!rule) return false;
+  const fromRule = normalizeAgentName(rule.from || "*") || "*";
+  const toRule = normalizeAgentName(rule.to || "*") || "*";
+  const fromValue = normalizeAgentName(from || "") || "";
+  const toValue = normalizeAgentName(to || "") || "";
+  return (fromRule === "*" || fromRule === fromValue) && (toRule === "*" || toRule === toValue);
+}
+
+function checkBridgeSendAllowed({ from, to, prompt }) {
+  const rules = readBridgeRules();
+  const fromName = normalizeAgentName(from || "manual") || "manual";
+  const toName = normalizeAgentName(to || "") || "";
+  if (rules.max_prompt_chars > 0 && String(prompt || "").length > rules.max_prompt_chars) {
+    return { allowed: false, reason: `Prompt exceeds max_prompt_chars (${rules.max_prompt_chars}).`, rules };
+  }
+  if (rules.block_self_send && toName && fromName === toName) {
+    return { allowed: false, reason: "Self-send is blocked by rules.", rules };
+  }
+  if ((rules.blocked || []).some((rule) => ruleMatches(rule, fromName, toName))) {
+    return { allowed: false, reason: "Blocked by bridge rules.", rules };
+  }
+  if (!rules.default_allow && !(rules.allowed || []).some((rule) => ruleMatches(rule, fromName, toName))) {
+    return { allowed: false, reason: "Not allowed by bridge rules.", rules };
+  }
+  return { allowed: true, reason: "", rules };
 }
 
 function writeBridgeEvent(record) {
@@ -97,16 +315,30 @@ function writeBridgeMessage(message) {
     id: message.id || bridgeId("msg"),
     created_at: new Date().toISOString(),
     from: singleLine(message.from || "panel"),
+    from_agent: normalizeAgentName(message.fromAgent || message.from_agent || message.from || ""),
+    to_agent: normalizeAgentName(message.toAgent || message.to_agent || ""),
     to_thread_id: singleLine(message.toThreadId || message.to_thread_id || message.threadId || ""),
     to_title: singleLine(message.toTitle || message.to_title || ""),
     cwd: normalizeCodexPath(message.cwd || ""),
     mode: singleLine(message.mode || "launch"),
     status: singleLine(message.status || "queued"),
+    handled_at: singleLine(message.handledAt || message.handled_at || ""),
     prompt: String(message.prompt || ""),
   };
   if (!record.to_thread_id) throw new Error("Missing target thread id.");
+  if (!record.to_agent) {
+    const agent = findBridgeAgentByThread(record.to_thread_id);
+    if (agent?.name) record.to_agent = agent.name;
+  }
   appendJsonLine(bridgeMessageFile(record.to_thread_id), record);
   writeBridgeEvent({ type: "message", message_id: record.id, thread_id: record.to_thread_id, status: record.status });
+  if (record.to_agent) {
+    const agent = resolveBridgeAgent(record.to_agent);
+    touchBridgeAgent(record.to_agent, {
+      last_message_at: record.created_at,
+      message_count: Number(agent?.message_count || 0) + 1,
+    });
+  }
   return record;
 }
 
@@ -127,12 +359,75 @@ function readBridgeMessages(threadId, maxLines = 50) {
     .slice(-maxLines);
 }
 
+function updateBridgeMessageStatus(messageId, status) {
+  const id = singleLine(messageId);
+  const nextStatus = singleLine(status);
+  if (!id || !nextStatus) return null;
+  const dir = bridgeMessagesDir();
+  let updated = null;
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const file = path.join(dir, entry.name);
+      const messages = readJsonLines(file, 0);
+      let changed = false;
+      const next = messages.map((message) => {
+        if (message?.id !== id) return message;
+        changed = true;
+        updated = {
+          ...message,
+          status: nextStatus,
+          handled_at: new Date().toISOString(),
+        };
+        return updated;
+      });
+      if (changed) {
+        fs.writeFileSync(file, `${next.map((item) => JSON.stringify(item)).join("\r\n")}\r\n`, "utf8");
+        writeBridgeEvent({ type: "message_status", message_id: id, status: nextStatus });
+        return updated;
+      }
+    }
+  } catch {
+  }
+  return updated;
+}
+
+function clearBridgeMessages(threadId, status = "") {
+  const targetThread = singleLine(threadId || "");
+  const targetStatus = singleLine(status || "");
+  const dir = bridgeMessagesDir();
+  let removed = 0;
+  try {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".jsonl")) continue;
+      const file = path.join(dir, entry.name);
+      const messages = readJsonLines(file, 0);
+      const kept = messages.filter((message) => {
+        const matchThread = !targetThread || message.to_thread_id === targetThread;
+        const matchStatus = !targetStatus || message.status === targetStatus;
+        const remove = matchThread && matchStatus;
+        if (remove) removed++;
+        return !remove;
+      });
+      if (kept.length !== messages.length) {
+        if (kept.length) fs.writeFileSync(file, `${kept.map((item) => JSON.stringify(item)).join("\r\n")}\r\n`, "utf8");
+        else fs.unlinkSync(file);
+      }
+    }
+  } catch {
+  }
+  if (removed) writeBridgeEvent({ type: "messages_clear", thread_id: targetThread, status: targetStatus, removed });
+  return removed;
+}
+
 function registerBridgeLaunch(launch) {
+  const agentName = normalizeAgentName(launch.agentName || launch.agent_name || "");
   const record = {
     id: launch.id || bridgeId("launch"),
     created_at: new Date().toISOString(),
     kind: singleLine(launch.kind || "resume"),
     source: singleLine(launch.source || "panel"),
+    agent: agentName,
     thread_id: singleLine(launch.threadId || launch.thread_id || ""),
     title: singleLine(launch.title || ""),
     cwd: normalizeCodexPath(launch.cwd || ""),
@@ -143,6 +438,16 @@ function registerBridgeLaunch(launch) {
   };
   appendJsonLine(path.join(bridgeHome(), "launches.jsonl"), record);
   writeBridgeEvent({ type: "launch", launch_id: record.id, thread_id: record.thread_id, kind: record.kind });
+  if (record.agent && record.thread_id) {
+    const agent = resolveBridgeAgent(record.agent);
+    touchBridgeAgent(record.agent, {
+      last_launch_at: record.created_at,
+      launch_count: Number(agent?.launch_count || 0) + 1,
+      title: record.title || agent?.title || "",
+      cwd: record.cwd || agent?.cwd || "",
+      project: record.project || agent?.project || "",
+    });
+  }
   return record;
 }
 
@@ -153,10 +458,16 @@ function readBridgeLaunches(maxLines = 50) {
 function readBridgeStats() {
   const launches = readBridgeLaunches(1);
   const messages = readBridgeMessages(null, 0);
+  const agents = listBridgeAgents();
+  const rules = readBridgeRules();
   return {
     home: bridgeHome(),
+    agentCount: agents.length,
+    agents: agents.slice(0, 12),
+    rules,
     launchCount: readJsonLines(path.join(bridgeHome(), "launches.jsonl"), 0).length,
     messageCount: messages.length,
+    queuedCount: messages.filter((message) => message.status === "queued").length,
     lastLaunch: launches[launches.length - 1] || null,
     lastMessage: messages[messages.length - 1] || null,
   };
@@ -740,9 +1051,11 @@ function detailLines(node) {
     ];
   }
   const t = node.thread;
+  const agent = findBridgeAgentByThread(t.id);
   return [
     { text: "Type: thread", color: COLORS.dark },
     { text: `Title: ${t.title}`, color: COLORS.white },
+    { text: `Agent: ${agent?.name || "(not set)"}`, color: agent?.name ? COLORS.green : COLORS.dark },
     { text: `Updated: ${t.updatedText}`, color: COLORS.gray },
     { text: `Project: ${t.project}`, color: COLORS.gray },
     { text: `Model: ${t.model || "-"}`, color: COLORS.gray },
@@ -761,8 +1074,9 @@ function statsLines(threads, nodes, includeArchived, search, bridgeStats) {
   const archived = threads.length - active;
   const lastMessage = bridgeStats?.lastMessage;
   const bridgeText = lastMessage
-    ? `Bridge: ${bridgeStats.messageCount} msgs | last ${lastMessage.status || "-"} -> ${lastMessage.to_title || lastMessage.to_thread_id || "-"}`
-    : `Bridge: ${bridgeStats?.messageCount || 0} msgs | no message`;
+    ? `Bridge: ${bridgeStats.messageCount} msgs | queued ${bridgeStats.queuedCount || 0} | last ${lastMessage.status || "-"}`
+    : `Bridge: ${bridgeStats?.messageCount || 0} msgs | queued ${bridgeStats?.queuedCount || 0}`;
+  const rules = bridgeStats?.rules || defaultBridgeRules();
   return [
     { text: `CodexHome: ${codexHome()}`, color: COLORS.dark },
     { text: `Projects: ${projects.size}`, color: COLORS.gray },
@@ -770,6 +1084,7 @@ function statsLines(threads, nodes, includeArchived, search, bridgeStats) {
     { text: `Visible nodes: ${nodes.length}`, color: COLORS.gray },
     { text: `Archive filter: ${includeArchived ? "shown" : "hidden"}`, color: COLORS.gray },
     { text: `Search: ${search || "(none)"}`, color: COLORS.gray },
+    { text: `Agents: ${bridgeStats?.agentCount || 0} | rules: ${rules.default_allow ? "allow" : "deny"} default | self: ${rules.block_self_send ? "blocked" : "allowed"}`, color: COLORS.gray },
     { text: bridgeText, color: COLORS.gray },
   ];
 }
@@ -799,6 +1114,7 @@ function keyLines(promptMode) {
     { text: "O: open selected thread with permissions", color: COLORS.gray },
     { text: "N: new thread with permissions", color: COLORS.gray },
     { text: "P: send prompt to selected thread", color: COLORS.green },
+    { text: "G: set agent alias for selected thread", color: COLORS.green },
     { text: "D: archive selected thread", color: COLORS.yellow },
     { text: "T: rename selected thread", color: COLORS.gray },
     { text: "F: open folder", color: COLORS.gray },
@@ -834,7 +1150,7 @@ function layout() {
   const bodyHeight = height - 2;
   const quotaHeight = 6;
   const detailsHeight = 12;
-  const statsHeight = 8;
+  const statsHeight = 10;
   const keysHeight = Math.max(5, bodyHeight - quotaHeight - detailsHeight - statsHeight);
   return { width, height, leftWidth, rightWidth, bodyHeight, detailsHeight, statsHeight, keysHeight, quotaHeight };
 }
@@ -862,7 +1178,9 @@ function treeContent(nodes, selectedIndex, scrollTop, treeHeight, width) {
       const t = node.thread;
       const archive = t.archived ? "A" : " ";
       const time = t.updatedText ? t.updatedText.slice(5) : "";
-      const prefix = `${threadIndent}${archive} ${time}  `;
+      const agent = findBridgeAgentByThread(t.id)?.name;
+      const agentText = agent ? ` @${agent}` : "";
+      const prefix = `${threadIndent}${archive} ${time}${agentText}  `;
       rows.push({
         text: `${prefix}${truncate(t.title, Math.max(8, width - displayWidth(prefix) - 2))}`,
         color: t.archived ? COLORS.yellow : COLORS.gray,
@@ -908,6 +1226,7 @@ function makeFrame(state) {
   if (state.promptMode === "search") status = `Search: ${state.promptBuffer}`;
   if (state.promptMode === "path") status = `Project path: ${state.promptBuffer}`;
   if (state.promptMode === "rename") status = `Rename > ${state.promptBuffer}`;
+  if (state.promptMode === "agent") status = `Agent alias: ${state.promptBuffer}`;
   if (state.promptMode === "permission") status = "Select permission: 1 Safe, 2 Normal, 3 Auto, 4 Full, Esc cancel";
   lines.push(style(pad(status, l.width), COLORS.dark));
   return lines.slice(0, l.height);
@@ -919,6 +1238,7 @@ function cursorColumnForPrompt(state) {
   if (state.promptMode === "search") prefix = "Search: ";
   else if (state.promptMode === "path") prefix = "Project path: ";
   else if (state.promptMode === "rename") prefix = "Rename > ";
+  else if (state.promptMode === "agent") prefix = "Agent alias: ";
   else return null;
   const beforeCursor = Array.from(state.promptBuffer || "").slice(0, state.promptCursor || 0).join("");
   return Math.min((process.stdout.columns || 120), displayWidth(prefix) + displayWidth(beforeCursor) + 1);
@@ -1133,9 +1453,10 @@ function addPromptVariable(commands, prompt) {
   return "$panelPrompt";
 }
 
-function openThread(thread, permissionMode = PERMISSION_MODES["2"], initialPrompt = "", source = "panel") {
+function openThread(thread, permissionMode = PERMISSION_MODES["2"], initialPrompt = "", source = "panel", agentName = "") {
   if (!thread?.id) return false;
   const mode = permissionMode || PERMISSION_MODES["2"];
+  const agent = upsertBridgeAgent(agentName || findBridgeAgentByThread(thread.id)?.name || defaultAgentName(thread), thread, source);
   const commands = [];
   if (thread.cwd && fs.existsSync(thread.cwd)) {
     commands.push(`Set-Location -LiteralPath ${psQuote(thread.cwd)}`);
@@ -1148,6 +1469,7 @@ function openThread(thread, permissionMode = PERMISSION_MODES["2"], initialPromp
     registerBridgeLaunch({
       kind: "resume",
       source,
+      agentName: agent.name,
       threadId: thread.id,
       title: thread.title,
       cwd: thread.cwd,
@@ -1317,6 +1639,23 @@ function handlePromptInput(state, key) {
         state.status = "Rename failed.";
       }
       state.pendingAction = null;
+    } else if (state.promptMode === "agent") {
+      const thread = state.pendingAction?.thread;
+      const agentName = normalizeAgentName(value);
+      if (!agentName) {
+        state.status = "Agent alias must contain letters, numbers, dot, dash, or underscore.";
+      } else if (thread) {
+        try {
+          const agent = upsertBridgeAgent(agentName, thread, "panel");
+          state.bridgeStats = readBridgeStats();
+          state.status = `Agent alias set: ${agent.name} -> ${thread.title}`;
+        } catch (error) {
+          state.status = `Agent alias failed: ${error.message || error}`;
+        }
+      } else {
+        state.status = "Select a thread before setting an agent alias.";
+      }
+      state.pendingAction = null;
     }
     state.promptMode = "";
     state.promptBuffer = "";
@@ -1416,6 +1755,19 @@ function handleKey(state, key, renderer) {
       state.status = `Choose permission mode for prompt: ${node.thread.title}`;
     } else {
       state.status = "Select a thread before sending a prompt.";
+    }
+    return true;
+  }
+  if (lower === "g") {
+    if (node?.type === "thread") {
+      const current = findBridgeAgentByThread(node.thread.id)?.name || defaultAgentName(node.thread);
+      state.promptMode = "agent";
+      state.promptBuffer = current;
+      state.promptCursor = Array.from(current).length;
+      state.pendingAction = { type: "agent", thread: node.thread };
+      state.status = `Set agent alias for: ${node.thread.title}`;
+    } else {
+      state.status = "Select a thread before setting an agent alias.";
     }
     return true;
   }
@@ -1536,7 +1888,9 @@ function main() {
     console.log(`Quota: ${state.quota?.rate ? `${state.quota.rate.plan_type || "-"} ${safePercent(state.quota.rate.primary?.used_percent)}%/${safePercent(state.quota.rate.secondary?.used_percent)}%` : "not found"}`);
     console.log(`RolloutTitlesVisible: ${state.threads.filter((t) => isRolloutName(t.title)).length}`);
     console.log(`BridgeHome: ${state.bridgeStats.home}`);
+    console.log(`BridgeAgents: ${state.bridgeStats.agentCount}`);
     console.log(`BridgeMessages: ${state.bridgeStats.messageCount}`);
+    console.log(`BridgeQueued: ${state.bridgeStats.queuedCount}`);
     console.log(`BridgeLaunches: ${state.bridgeStats.launchCount}`);
     return;
   }
@@ -1638,18 +1992,30 @@ function splitKeys(chunk) {
 module.exports = {
   PERMISSION_MODES,
   bridgeHome,
+  checkBridgeSendAllowed,
+  clearBridgeMessages,
   codexHome,
+  defaultAgentName,
+  findBridgeAgentByThread,
+  listBridgeAgents,
   newThread,
   openThread,
   projectName,
+  readBridgeAgents,
   readBridgeLaunches,
   readBridgeMessages,
+  readBridgeRules,
   readBridgeStats,
   readLatestQuota,
   readThreads,
   registerBridgeLaunch,
+  removeBridgeAgent,
+  resolveBridgeAgent,
+  updateBridgeMessageStatus,
+  upsertBridgeAgent,
   writeBridgeEvent,
   writeBridgeMessage,
+  writeBridgeRules,
 };
 
 if (require.main === module) {

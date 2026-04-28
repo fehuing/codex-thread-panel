@@ -1,5 +1,6 @@
 param(
   [string]$ThreadId,
+  [string]$To,
   [string]$Query,
   [string]$Prompt,
   [string]$PromptFile,
@@ -18,8 +19,8 @@ if (-not (Test-Path -LiteralPath $bridgeScript)) {
   throw "CodexThreadBridge.js not found: $bridgeScript"
 }
 
-if (-not $ThreadId -and -not $Query) {
-  throw "Use -ThreadId or -Query to select a target thread."
+if (-not $ThreadId -and -not $To -and -not $Query) {
+  throw "Use -To, -ThreadId, or -Query to select a target thread."
 }
 
 if (-not $PromptFile) {
@@ -43,7 +44,9 @@ if (-not $PromptFile) {
 }
 
 $argsList = @($bridgeScript, "send")
-if ($ThreadId) {
+if ($To) {
+  $argsList += @("--to", $To)
+} elseif ($ThreadId) {
   $argsList += @("--thread-id", $ThreadId)
 } else {
   $argsList += @("--query", $Query)
