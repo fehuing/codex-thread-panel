@@ -541,6 +541,37 @@ function readBridgeStats() {
   };
 }
 
+function autoRegisterPanelNewThreads(threads) {
+  const launches = readBridgeLaunches(200)
+    .filter((launch) => launch.kind === "new" && launch.source === "panel" && !launch.thread_id && launch.cwd)
+    .map((launch) => ({
+      ...launch,
+      createdTime: Date.parse(launch.created_at || ""),
+    }))
+    .filter((launch) => Number.isFinite(launch.createdTime));
+  if (!launches.length) return 0;
+
+  let count = 0;
+  const oneDayMs = 24 * 60 * 60 * 1000;
+  for (const thread of threads || []) {
+    if (!thread?.id || findBridgeAgentByThread(thread.id)) continue;
+    const threadTime = thread.updated?.getTime?.() || Date.parse(thread.updatedText || "");
+    if (!Number.isFinite(threadTime)) continue;
+    const matched = launches.some((launch) => {
+      if (normalizeCodexPath(launch.cwd || "").toLowerCase() !== normalizeCodexPath(thread.cwd || "").toLowerCase()) return false;
+      if (threadTime < launch.createdTime - 5 * 60 * 1000) return false;
+      if (threadTime > launch.createdTime + oneDayMs) return false;
+      if (launch.prompt_preview && thread.firstUserMessage && !singleLine(thread.firstUserMessage).includes(singleLine(launch.prompt_preview).slice(0, 20))) return false;
+      return true;
+    });
+    if (matched) {
+      upsertBridgeAgent(defaultAgentName(thread), thread, "panel-new-auto");
+      count++;
+    }
+  }
+  return count;
+}
+
 function displayLine(value) {
   if (value === null || value === undefined) return "";
   return String(value).replace(/[\r\n\t]+/g, " ");
@@ -1931,11 +1962,13 @@ function handleKey(state, key, renderer) {
   }
   if (lower === "r") {
     state.threads = readThreads();
+    const addedAgents = autoRegisterPanelNewThreads(state.threads);
+    if (addedAgents) state.threads = readThreads();
     state.quota = readLatestQuota();
     state.bridgeStats = readBridgeStats();
     state.selectedIndex = 0;
     state.scrollTop = 0;
-    state.status = "Refreshed data.";
+    state.status = addedAgents ? `Refreshed data. Auto-created ${addedAgents} agent alias(es).` : "Refreshed data.";
     rebuildNodes(state);
     renderer.reset();
     return true;
@@ -1959,6 +1992,8 @@ function handleKey(state, key, renderer) {
 }
 
 function main() {
+  const initialThreads = readThreads();
+  autoRegisterPanelNewThreads(initialThreads);
   const state = {
     threads: readThreads(),
     quota: readLatestQuota(),
