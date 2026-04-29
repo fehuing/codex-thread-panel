@@ -1653,10 +1653,13 @@ function startManagedThread(thread, permissionMode = PERMISSION_MODES["2"], agen
   if (!fs.existsSync(script)) return false;
   const mode = permissionMode || PERMISSION_MODES["2"];
   const agent = upsertBridgeAgent(agentName || findBridgeAgentByThread(thread.id)?.name || defaultAgentName(thread), thread, source);
-  const windowTitle = `Managed - ${singleLine(thread.title) || agent.name} - ${mode.name}`;
+  const windowTitle = `Codex - ${singleLine(thread.title) || agent.name} - ${mode.name}`;
   const commands = [
     `Set-Location -LiteralPath ${psQuote(__dirname)}`,
-    `node ${psQuote(script)} start --thread-id ${psQuote(thread.id)} --agent ${psQuote(agent.name)} --permission ${psQuote(mode.name)} --window-title ${psQuote(windowTitle)}${thread.model ? ` --model ${psQuote(thread.model)}` : ""}${thread.reasoningEffort ? ` --reasoning ${psQuote(thread.reasoningEffort)}` : ""}`,
+    "$env:CODEX_MANAGED_HISTORY_REPLAY = '0'",
+    "$env:CODEX_MANAGED_ALT_SCREEN = '1'",
+    "$env:CODEX_MANAGED_VERBOSE = '0'",
+    `node ${psQuote(script)} start --thread-id ${psQuote(thread.id)} --agent ${psQuote(agent.name)} --permission ${psQuote(mode.name)} --window-title ${psQuote(windowTitle)} --history 0 --alt-screen 1 --verbose 0${thread.model ? ` --model ${psQuote(thread.model)}` : ""}${thread.reasoningEffort ? ` --reasoning ${psQuote(thread.reasoningEffort)}` : ""}`,
   ];
   return startPowerShell(commands, windowTitle);
 }
