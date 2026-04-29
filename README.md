@@ -100,6 +100,6 @@ Phase 3 cannot inject into old windows opened with `O` or manually opened PowerS
 
 Managed sessions wait briefly before the first injection so a newly resumed Codex TUI can finish loading. Tune with `CODEX_MANAGED_INITIAL_INJECT_DELAY_MS`, `CODEX_MANAGED_SUBMIT_DELAY_MS`, `CODEX_MANAGED_SUBMIT_RETRY_MS`, and `CODEX_MANAGED_SUBMIT_ENTER_COUNT` if a local terminal behaves differently.
 
-Panel-managed sessions restore the last 3 user turns by default, then start Codex with `--no-alt-screen` so the restored context remains visible in the same scrollback. Set `CODEX_MANAGED_HISTORY_TURNS` to tune the count, or `CODEX_MANAGED_HISTORY_REPLAY=0` to disable local replay for manual `CodexManagedSession.js` launches.
+Panel-managed sessions default to the official Codex TUI. The managed runner stays in the background to own the PTY, inject bridge prompts, and submit them, but it does not render custom history by default. Use `CODEX_MANAGED_HISTORY_REPLAY=1` or `--history 1 --history-turns 3 --alt-screen 0` only for manual debugging.
 
 Use `node .\CodexThreadBridge.js managed cleanup --dry-run` to preview stale managed-session records, then run without `--dry-run` to remove stale/stopped records older than the selected threshold.
