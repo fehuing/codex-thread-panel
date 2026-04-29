@@ -28,6 +28,7 @@ Usage:
   node CodexManagedSession.js start --thread-id ID --agent AGENT [--permission Normal] [--model MODEL] [--reasoning EFFORT]
   node CodexManagedSession.js start --to AGENT [--permission Normal] [--model MODEL] [--reasoning EFFORT]
   node CodexManagedSession.js start --to AGENT --history 0
+  node CodexManagedSession.js start --to AGENT --history-skip-tail 4
   node CodexManagedSession.js list [--all] [--json]
   node CodexManagedSession.js self-test
 
@@ -314,14 +315,17 @@ function transcriptItems(thread) {
 function replayHistory(thread, options) {
   const enabled = String(options.history ?? process.env.CODEX_MANAGED_HISTORY_REPLAY ?? "1").toLowerCase() !== "0";
   if (!enabled) return;
-  const items = transcriptItems(thread);
+  const allItems = transcriptItems(thread);
+  const skipTail = Math.max(0, Number(options["history-skip-tail"] ?? process.env.CODEX_MANAGED_HISTORY_SKIP_TAIL ?? 4) || 0);
+  const items = skipTail > 0 ? allItems.slice(0, Math.max(0, allItems.length - skipTail)) : allItems;
   if (!items.length) return;
   const maxChars = Number(options["history-max-chars"] || process.env.CODEX_MANAGED_HISTORY_REPLAY_MAX_CHARS || 2000000);
   let written = 0;
   const width = terminalWidth();
   process.stdout.write(`\r\n${STYLE.dark}${line(width)}${STYLE.reset}\r\n`);
   process.stdout.write(`${STYLE.white}Restored conversation history${STYLE.reset} ${STYLE.dim}${thread.title || thread.id}${STYLE.reset}\r\n`);
-  process.stdout.write(`${STYLE.dim}${items.length} messages loaded from local Codex session log${STYLE.reset}\r\n`);
+  const skippedText = skipTail > 0 ? `, skipped latest ${Math.min(skipTail, allItems.length)} to avoid duplicate resume output` : "";
+  process.stdout.write(`${STYLE.dim}${items.length} messages loaded from local Codex session log${skippedText}${STYLE.reset}\r\n`);
   process.stdout.write(`${STYLE.dark}${line(width)}${STYLE.reset}\r\n\r\n`);
   for (const item of items) {
     const isUser = item.role === "User";
