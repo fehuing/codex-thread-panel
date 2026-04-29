@@ -234,8 +234,9 @@ function bridgeHeaderForMessage(message, fallbackAgent, fallbackThreadId) {
   if (replyTo) lines.push(`Reply-To: ${replyTo}`);
   lines.push(`Require-Reply: ${requireReply ? "yes" : "no"}`);
   if (replyTo && requireReply) {
-    lines.push(`Reply-Command: powershell -ExecutionPolicy Bypass -File "${path.join(__dirname, "Send-CodexThreadMessage.ps1")}" -To ${replyTo} -Mode auto -From ${to} -Prompt "<reply text>"`);
-    lines.push("Reply-Note: If command execution requires approval, ask the user to approve it.");
+    lines.push(`Reply-Command: powershell -ExecutionPolicy Bypass -File "${path.join(__dirname, "Send-CodexThreadMessage.ps1")}" -To ${replyTo} -Mode inject -From ${to} -Prompt "<reply text>"`);
+    lines.push("Reply-Note: Use Reply-Command exactly. Reply mode is inject so it reuses the existing managed window and never opens a new one.");
+    lines.push("Reply-Approval: If command execution requires approval, ask the user to approve it.");
   }
   lines.push("");
   return lines.join("\n");

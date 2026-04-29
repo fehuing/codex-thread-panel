@@ -88,8 +88,9 @@ To: frontend-agent
 Message-Id: msg-...
 Reply-To: thread-a
 Require-Reply: yes
-Reply-Command: powershell -ExecutionPolicy Bypass -File "D:\codex_chat\Send-CodexThreadMessage.ps1" -To thread-a -Mode auto -From frontend-agent -Prompt "<reply text>"
-Reply-Note: If command execution requires approval, ask the user to approve it.
+Reply-Command: powershell -ExecutionPolicy Bypass -File "D:\codex_chat\Send-CodexThreadMessage.ps1" -To thread-a -Mode inject -From frontend-agent -Prompt "<reply text>"
+Reply-Note: Use Reply-Command exactly. Reply mode is inject so it reuses the existing managed window and never opens a new one.
+Reply-Approval: If command execution requires approval, ask the user to approve it.
 
 your prompt
 ```
