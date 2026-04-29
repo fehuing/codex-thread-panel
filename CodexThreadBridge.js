@@ -21,6 +21,7 @@ const {
   readThreads,
   removeBridgeAgent,
   resolveBridgeAgent,
+  startManagedThread,
   updateBridgeMessageStatus,
   upsertBridgeAgent,
   writeBridgeMessage,
@@ -34,8 +35,9 @@ Usage:
   node CodexThreadBridge.js list [--query TEXT] [--all] [--limit N] [--json]
   node CodexThreadBridge.js resolve --query TEXT [--json]
   node CodexThreadBridge.js send --to AGENT --prompt TEXT [--permission 2] [--mode inject]
+  node CodexThreadBridge.js send --to AGENT --prompt TEXT --mode auto [--reply-to AGENT] [--require-reply]
   node CodexThreadBridge.js send --thread-id ID --prompt TEXT [--permission 2] [--mode launch]
-  node CodexThreadBridge.js send --query TEXT --prompt-file prompt.txt [--mode launch|queue|inject]
+  node CodexThreadBridge.js send --query TEXT --prompt-file prompt.txt [--mode launch|queue|inject|auto]
   node CodexThreadBridge.js inbox [--thread-id ID] [--json]
   node CodexThreadBridge.js mark --message-id ID --status done
   node CodexThreadBridge.js clear [--thread-id ID] [--status queued]
@@ -54,6 +56,7 @@ Permission modes:
 Notes:
   launch opens a new Codex window. queue only records the message.
   inject writes to a running managed PTY session started with CodexManagedSession.js.
+  auto injects if the managed session is online, otherwise it starts one and queues the prompt.
 `);
 }
 
@@ -208,22 +211,58 @@ function resolveCommand(options) {
   printThread(resolveThread(options), Boolean(options.json));
 }
 
+function findOnlineManagedSession(thread, agentName = "") {
+  const targetAgent = String(agentName || "").trim().toLowerCase();
+  return readManagedSessions(false).find((session) => {
+    const sameThread = thread?.id && session.thread_id === thread.id;
+    const sameAgent = targetAgent && String(session.agent || "").toLowerCase() === targetAgent;
+    return sameThread || sameAgent;
+  }) || null;
+}
+
+function booleanOption(options, name, fallback = false) {
+  if (options[name] === true) return true;
+  return parseBoolean(options[name], fallback);
+}
+
 function sendCommand(options) {
   const thread = resolveThread(options);
   const prompt = readPrompt(options);
   const mode = String(options.mode || "launch").toLowerCase();
-  if (!["launch", "queue", "inject", "managed"].includes(mode)) fail(`Unknown mode: ${mode}`);
+  if (!["launch", "queue", "inject", "managed", "auto"].includes(mode)) fail(`Unknown mode: ${mode}`);
 
   let launched = false;
+  let autoStarted = false;
+  let managedOnline = false;
+  let effectiveMode = mode;
   const permission = normalizePermission(options.permission || options["permission-mode"] || "2");
   const from = options.from || "bridge";
-  const toAgent = options.to ? resolveBridgeAgent(options.to)?.name || "" : findBridgeAgentByThread(thread.id)?.name || "";
+  const explicitAgent = options.to ? resolveBridgeAgent(options.to) : null;
+  const existingAgent = explicitAgent || findBridgeAgentByThread(thread.id);
+  const toAgent = existingAgent?.name || (mode === "auto" ? defaultAgentName(thread) : "");
+  const requireReply = booleanOption(options, "require-reply", false);
+  const replyToOption = options["reply-to"] || options.replyTo || options.reply || "";
+  const genericFrom = ["", "manual", "bridge", "panel"].includes(String(from || "").trim().toLowerCase());
+  const replyToFallback = requireReply && !replyToOption && !genericFrom ? from : "";
+  const replyTo = replyToOption && replyToOption !== true ? String(replyToOption) : replyToFallback;
+  if (requireReply && !replyTo) fail("Missing --reply-to for --require-reply.");
   const decision = checkBridgeSendAllowed({ from, to: toAgent || thread.id, prompt });
   if (!decision.allowed) fail(`Bridge send blocked: ${decision.reason}`);
+
+  if (mode === "auto") {
+    upsertBridgeAgent(toAgent || defaultAgentName(thread), thread, from || "bridge-auto");
+    const session = findOnlineManagedSession(thread, toAgent);
+    managedOnline = Boolean(session);
+    if (!session) {
+      autoStarted = startManagedThread(thread, permission, toAgent, "bridge-auto");
+    }
+    effectiveMode = "inject";
+  }
+
   if (mode === "launch") {
     launched = openThread(thread, permission, prompt, from, toAgent);
   }
-  const status = mode === "queue" || mode === "inject" || mode === "managed"
+  const status = effectiveMode === "queue" || effectiveMode === "inject" || effectiveMode === "managed"
     ? "queued"
     : launched ? "launched" : "launch_failed";
 
@@ -234,19 +273,26 @@ function sendCommand(options) {
     toThreadId: thread.id,
     toTitle: thread.title,
     cwd: thread.cwd,
-    mode,
+    mode: effectiveMode,
     status,
+    replyTo,
+    requireReply,
     prompt,
   });
 
   const result = {
-    ok: mode === "queue" || mode === "inject" || mode === "managed" || launched,
+    ok: mode === "queue" || mode === "inject" || mode === "managed" || launched || managedOnline || autoStarted,
     message_id: message.id,
     status: message.status,
     thread_id: thread.id,
     to_agent: toAgent || "",
     title: thread.title,
     mode,
+    effective_mode: effectiveMode,
+    managed_online: managedOnline,
+    auto_started: autoStarted,
+    reply_to: message.reply_to || "",
+    require_reply: Boolean(message.require_reply),
     bridge_home: bridgeHome(),
   };
 
@@ -257,6 +303,8 @@ function sendCommand(options) {
     console.log(`Thread: ${result.thread_id}`);
     if (result.to_agent) console.log(`Agent: ${result.to_agent}`);
     console.log(`Title: ${result.title}`);
+    if (mode === "auto") console.log(`Managed: ${managedOnline ? "online" : autoStarted ? "started" : "start_failed"}`);
+    if (result.reply_to) console.log(`ReplyTo: ${result.reply_to}`);
   }
 
   if (!result.ok) process.exit(1);

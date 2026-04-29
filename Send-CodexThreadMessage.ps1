@@ -5,9 +5,11 @@ param(
   [string]$Prompt,
   [string]$PromptFile,
   [string]$Permission = "2",
-  [ValidateSet("launch", "queue", "inject", "managed")]
+  [ValidateSet("launch", "queue", "inject", "managed", "auto")]
   [string]$Mode = "launch",
   [string]$From = "manual",
+  [string]$ReplyTo,
+  [switch]$RequireReply,
   [switch]$Stdin
 )
 
@@ -55,6 +57,12 @@ $argsList += @("--prompt-file", $PromptFile)
 $argsList += @("--permission", $Permission)
 $argsList += @("--mode", $Mode)
 $argsList += @("--from", $From)
+if ($ReplyTo) {
+  $argsList += @("--reply-to", $ReplyTo)
+}
+if ($RequireReply) {
+  $argsList += @("--require-reply")
+}
 
 & node @argsList
 exit $LASTEXITCODE

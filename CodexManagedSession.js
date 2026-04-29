@@ -221,13 +221,22 @@ function bridgeHeaderForMessage(message, fallbackAgent, fallbackThreadId) {
   const from = message.from_agent || message.from || "unknown";
   const to = message.to_agent || fallbackAgent || message.to_thread_id || fallbackThreadId || "unknown";
   const messageId = message.id || "";
-  return [
+  const replyTo = message.reply_to || message.replyTo || "";
+  const requireReply = Boolean(message.require_reply || message.requireReply);
+  const lines = [
     "[Bridge message]",
     `From: ${from}`,
     `To: ${to}`,
-    messageId ? `Message-Id: ${messageId}` : "",
-    "",
-  ].filter((line, index, lines) => line || index === lines.length - 1).join("\n");
+  ];
+  if (messageId) lines.push(`Message-Id: ${messageId}`);
+  if (replyTo) lines.push(`Reply-To: ${replyTo}`);
+  lines.push(`Require-Reply: ${requireReply ? "yes" : "no"}`);
+  if (replyTo && requireReply) {
+    lines.push(`Reply-Command: powershell -ExecutionPolicy Bypass -File "${path.join(__dirname, "Send-CodexThreadMessage.ps1")}" -To ${replyTo} -Mode auto -From ${to} -Prompt "<reply text>"`);
+    lines.push("Reply-Note: If command execution requires approval, ask the user to approve it.");
+  }
+  lines.push("");
+  return lines.join("\n");
 }
 
 function promptForMessage(message, fallbackAgent, fallbackThreadId) {
@@ -466,7 +475,7 @@ function startCommand(options) {
     const messages = readBridgeMessages(thread.id, 200)
       .filter((message) => !seen.has(message.id))
       .filter((message) => message.status === "queued")
-      .filter((message) => ["inject", "managed"].includes(String(message.mode || "").toLowerCase()))
+      .filter((message) => ["inject", "managed", "auto"].includes(String(message.mode || "").toLowerCase()))
       .filter((message) => !message.to_agent || message.to_agent === agentName || message.to_thread_id === thread.id);
 
     try {

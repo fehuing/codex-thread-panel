@@ -323,6 +323,8 @@ function writeBridgeMessage(message) {
     mode: singleLine(message.mode || "launch"),
     status: singleLine(message.status || "queued"),
     handled_at: singleLine(message.handledAt || message.handled_at || ""),
+    reply_to: normalizeAgentName(message.replyTo || message.reply_to || ""),
+    require_reply: Boolean(message.requireReply || message.require_reply),
     prompt: String(message.prompt || ""),
   };
   if (!record.to_thread_id) throw new Error("Missing target thread id.");
@@ -1602,12 +1604,12 @@ function openThread(thread, permissionMode = PERMISSION_MODES["2"], initialPromp
   return ok;
 }
 
-function startManagedThread(thread, permissionMode = PERMISSION_MODES["2"]) {
+function startManagedThread(thread, permissionMode = PERMISSION_MODES["2"], agentName = "", source = "panel-managed") {
   if (!thread?.id) return false;
   const script = path.join(__dirname, "CodexManagedSession.js");
   if (!fs.existsSync(script)) return false;
   const mode = permissionMode || PERMISSION_MODES["2"];
-  const agent = upsertBridgeAgent(findBridgeAgentByThread(thread.id)?.name || defaultAgentName(thread), thread, "panel-managed");
+  const agent = upsertBridgeAgent(agentName || findBridgeAgentByThread(thread.id)?.name || defaultAgentName(thread), thread, source);
   const windowTitle = `Managed - ${singleLine(thread.title) || agent.name} - ${mode.name}`;
   const commands = [
     `Set-Location -LiteralPath ${psQuote(__dirname)}`,
@@ -2155,6 +2157,7 @@ module.exports = {
   listBridgeAgents,
   newThread,
   openThread,
+  startManagedThread,
   projectName,
   readBridgeAgents,
   readBridgeLaunches,
