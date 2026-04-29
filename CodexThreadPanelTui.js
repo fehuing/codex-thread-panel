@@ -1613,7 +1613,7 @@ function startManagedThread(thread, permissionMode = PERMISSION_MODES["2"], agen
   const windowTitle = `Managed - ${singleLine(thread.title) || agent.name} - ${mode.name}`;
   const commands = [
     `Set-Location -LiteralPath ${psQuote(__dirname)}`,
-    `node ${psQuote(script)} start --thread-id ${psQuote(thread.id)} --agent ${psQuote(agent.name)} --permission ${psQuote(mode.name)} --window-title ${psQuote(windowTitle)}${thread.model ? ` --model ${psQuote(thread.model)}` : ""}${thread.reasoningEffort ? ` --reasoning ${psQuote(thread.reasoningEffort)}` : ""}`,
+    `node ${psQuote(script)} start --thread-id ${psQuote(thread.id)} --agent ${psQuote(agent.name)} --permission ${psQuote(mode.name)} --window-title ${psQuote(windowTitle)} --history 1 --history-turns 3 --alt-screen 0${thread.model ? ` --model ${psQuote(thread.model)}` : ""}${thread.reasoningEffort ? ` --reasoning ${psQuote(thread.reasoningEffort)}` : ""}`,
   ];
   return startPowerShell(commands, windowTitle);
 }

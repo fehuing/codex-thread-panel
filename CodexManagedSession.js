@@ -28,6 +28,7 @@ Usage:
   node CodexManagedSession.js start --thread-id ID --agent AGENT [--permission Normal] [--model MODEL] [--reasoning EFFORT]
   node CodexManagedSession.js start --to AGENT [--permission Normal] [--model MODEL] [--reasoning EFFORT]
   node CodexManagedSession.js start --to AGENT --history 1
+  node CodexManagedSession.js start --to AGENT --history 1 --history-turns 3
   node CodexManagedSession.js start --to AGENT --alt-screen 0
   node CodexManagedSession.js start --to AGENT --history-skip-tail 4
   node CodexManagedSession.js list [--all] [--json]
@@ -322,20 +323,40 @@ function transcriptItems(thread) {
   return items.filter((item) => item.text.trim());
 }
 
+function lastUserTurns(items, count) {
+  const turnCount = Math.max(0, Number(count) || 0);
+  if (!turnCount) return items;
+  let seenUsers = 0;
+  let startIndex = 0;
+  for (let i = items.length - 1; i >= 0; i--) {
+    if (items[i].role !== "User") continue;
+    seenUsers++;
+    if (seenUsers === turnCount) {
+      startIndex = i;
+      break;
+    }
+  }
+  return items.slice(seenUsers < turnCount ? 0 : startIndex);
+}
+
 function replayHistory(thread, options) {
   const enabled = String(options.history ?? process.env.CODEX_MANAGED_HISTORY_REPLAY ?? "0").toLowerCase() !== "0";
   if (!enabled) return;
   const allItems = transcriptItems(thread);
-  const skipTail = Math.max(0, Number(options["history-skip-tail"] ?? process.env.CODEX_MANAGED_HISTORY_SKIP_TAIL ?? 4) || 0);
-  const items = skipTail > 0 ? allItems.slice(0, Math.max(0, allItems.length - skipTail)) : allItems;
+  const turnCount = Math.max(0, Number(options["history-turns"] ?? process.env.CODEX_MANAGED_HISTORY_TURNS ?? 0) || 0);
+  const skipTailDefault = turnCount > 0 ? 0 : 4;
+  const skipTail = Math.max(0, Number(options["history-skip-tail"] ?? process.env.CODEX_MANAGED_HISTORY_SKIP_TAIL ?? skipTailDefault) || 0);
+  const sourceItems = skipTail > 0 ? allItems.slice(0, Math.max(0, allItems.length - skipTail)) : allItems;
+  const items = lastUserTurns(sourceItems, turnCount);
   if (!items.length) return;
   const maxChars = Number(options["history-max-chars"] || process.env.CODEX_MANAGED_HISTORY_REPLAY_MAX_CHARS || 2000000);
   let written = 0;
   const width = terminalWidth();
   process.stdout.write(`\r\n${STYLE.dark}${line(width)}${STYLE.reset}\r\n`);
-  process.stdout.write(`${STYLE.white}Restored conversation history${STYLE.reset} ${STYLE.dim}${thread.title || thread.id}${STYLE.reset}\r\n`);
+  process.stdout.write(`${STYLE.white}Restored recent history${STYLE.reset} ${STYLE.dim}${thread.title || thread.id}${STYLE.reset}\r\n`);
   const skippedText = skipTail > 0 ? `, skipped latest ${Math.min(skipTail, allItems.length)} to avoid duplicate resume output` : "";
-  process.stdout.write(`${STYLE.dim}${items.length} messages loaded from local Codex session log${skippedText}${STYLE.reset}\r\n`);
+  const turnText = turnCount > 0 ? `last ${turnCount} user turns, ` : "";
+  process.stdout.write(`${STYLE.dim}${turnText}${items.length} messages loaded from local Codex session log${skippedText}${STYLE.reset}\r\n`);
   process.stdout.write(`${STYLE.dark}${line(width)}${STYLE.reset}\r\n\r\n`);
   for (const item of items) {
     const isUser = item.role === "User";
@@ -352,8 +373,7 @@ function replayHistory(thread, options) {
     process.stdout.write(`${body}\r\n\r\n`);
     written += plainBlock.length;
   }
-  process.stdout.write(`${STYLE.dark}${line(width)}${STYLE.reset}\r\n`);
-  process.stdout.write(`${STYLE.dim}Live managed Codex session starts below.${STYLE.reset}\r\n\r\n`);
+  process.stdout.write(`${STYLE.dark}${line(width)}${STYLE.reset}\r\n\r\n`);
 }
 
 function sleep(ms) {
