@@ -27,7 +27,8 @@ function usage() {
 Usage:
   node CodexManagedSession.js start --thread-id ID --agent AGENT [--permission Normal] [--model MODEL] [--reasoning EFFORT]
   node CodexManagedSession.js start --to AGENT [--permission Normal] [--model MODEL] [--reasoning EFFORT]
-  node CodexManagedSession.js start --to AGENT --history 0
+  node CodexManagedSession.js start --to AGENT --history 1
+  node CodexManagedSession.js start --to AGENT --alt-screen 0
   node CodexManagedSession.js start --to AGENT --history-skip-tail 4
   node CodexManagedSession.js list [--all] [--json]
   node CodexManagedSession.js self-test
@@ -322,7 +323,7 @@ function transcriptItems(thread) {
 }
 
 function replayHistory(thread, options) {
-  const enabled = String(options.history ?? process.env.CODEX_MANAGED_HISTORY_REPLAY ?? "1").toLowerCase() !== "0";
+  const enabled = String(options.history ?? process.env.CODEX_MANAGED_HISTORY_REPLAY ?? "0").toLowerCase() !== "0";
   if (!enabled) return;
   const allItems = transcriptItems(thread);
   const skipTail = Math.max(0, Number(options["history-skip-tail"] ?? process.env.CODEX_MANAGED_HISTORY_SKIP_TAIL ?? 4) || 0);
@@ -392,22 +393,25 @@ function startCommand(options) {
   const sessionId = `${agentName}-${process.pid}`;
   const cwd = thread.cwd && fs.existsSync(thread.cwd) ? thread.cwd : process.cwd();
   const modelArgs = threadModelArgs(thread, options);
-  const inlineMode = String(options["alt-screen"] || process.env.CODEX_MANAGED_ALT_SCREEN || "0").toLowerCase() === "0";
+  const noAltScreen = String(options["alt-screen"] ?? process.env.CODEX_MANAGED_ALT_SCREEN ?? "1").toLowerCase() === "0";
+  const verbose = String(options.verbose ?? process.env.CODEX_MANAGED_VERBOSE ?? "0").toLowerCase() !== "0";
   const args = ["resume", ...permissionArgs(mode), ...modelArgs];
-  if (inlineMode) args.push("--no-alt-screen");
+  if (noAltScreen) args.push("--no-alt-screen");
   args.push(thread.id);
   if (options.prompt && options.prompt !== true) args.push(String(options.prompt));
 
   const windowTitle = singleLine(options["window-title"]) || `Managed - ${thread.title || agentName} - ${mode.name}`;
   setTerminalTitle(windowTitle);
-  console.log(`Managed agent: ${agentName}`);
-  console.log(`Thread: ${thread.id}`);
-  console.log(`Mode: ${mode.name}`);
-  if (modelArgs.length) console.log(`Model: ${modelArgs.join(" ")}`);
-  console.log(`Alt screen: ${inlineMode ? "off" : "on"}`);
-  console.log("Injection: send --to " + agentName + " --mode inject");
   const spawnSpec = buildCodexSpawn(args);
-  console.log(`Command: ${spawnSpec.display}`);
+  if (verbose) {
+    console.log(`Managed agent: ${agentName}`);
+    console.log(`Thread: ${thread.id}`);
+    console.log(`Mode: ${mode.name}`);
+    if (modelArgs.length) console.log(`Model: ${modelArgs.join(" ")}`);
+    console.log(`Alt screen: ${noAltScreen ? "off" : "on"}`);
+    console.log("Injection: send --to " + agentName + " --mode inject");
+    console.log(`Command: ${spawnSpec.display}`);
+  }
   replayHistory(thread, options);
 
   const term = pty.spawn(spawnSpec.file, spawnSpec.args, {
