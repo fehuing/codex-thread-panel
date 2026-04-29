@@ -95,3 +95,5 @@ your prompt
 Set `CODEX_MANAGED_BRIDGE_HEADER=0` to inject the raw prompt without this header.
 
 Phase 3 cannot inject into old windows opened with `O` or manually opened PowerShell. Those processes are not owned by the panel. Use `M` or `CodexManagedSession.js start` for sessions that need direct injection.
+
+Managed sessions wait briefly before the first injection so a newly resumed Codex TUI can finish loading. Tune with `CODEX_MANAGED_INITIAL_INJECT_DELAY_MS`, `CODEX_MANAGED_SUBMIT_DELAY_MS`, `CODEX_MANAGED_SUBMIT_RETRY_MS`, and `CODEX_MANAGED_SUBMIT_ENTER_COUNT` if a local terminal behaves differently.

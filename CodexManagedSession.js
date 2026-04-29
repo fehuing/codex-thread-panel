@@ -362,10 +362,14 @@ function sleep(ms) {
 async function writePromptToPty(term, prompt) {
   const text = plainInjectText(prompt);
   if (!text.trim()) return;
-  const submitDelayMs = Number(process.env.CODEX_MANAGED_SUBMIT_DELAY_MS || 200);
+  const submitDelayMs = Number(process.env.CODEX_MANAGED_SUBMIT_DELAY_MS || 350);
+  const retryDelayMs = Number(process.env.CODEX_MANAGED_SUBMIT_RETRY_MS || 1000);
+  const enterCount = Math.max(1, Number(process.env.CODEX_MANAGED_SUBMIT_ENTER_COUNT || 2) || 2);
   term.write(`\x1b[200~${text}\x1b[201~`);
-  await sleep(Math.max(25, submitDelayMs));
-  term.write("\r");
+  for (let i = 0; i < enterCount; i++) {
+    await sleep(Math.max(25, i === 0 ? submitDelayMs : retryDelayMs));
+    term.write("\r");
+  }
 }
 
 function listCommand(options) {
@@ -468,9 +472,12 @@ function startCommand(options) {
 
   const seen = new Set();
   let injecting = false;
+  const startedAtMs = Date.now();
+  const initialInjectDelayMs = Number(options["initial-inject-delay"] || process.env.CODEX_MANAGED_INITIAL_INJECT_DELAY_MS || 5000);
   setInterval(() => heartbeat("running"), 3000);
   setInterval(async () => {
     if (injecting) return;
+    if (Date.now() - startedAtMs < Math.max(0, initialInjectDelayMs)) return;
     injecting = true;
     const messages = readBridgeMessages(thread.id, 200)
       .filter((message) => !seen.has(message.id))
