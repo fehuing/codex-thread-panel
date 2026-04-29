@@ -9,6 +9,7 @@ const {
   bridgeHome,
   checkBridgeSendAllowed,
   clearBridgeMessages,
+  cleanupManagedSessions,
   defaultAgentName,
   findBridgeAgentByThread,
   listBridgeAgents,
@@ -47,6 +48,7 @@ Usage:
   node CodexThreadBridge.js rules show [--json]
   node CodexThreadBridge.js rules set --default-allow true|false --block-self true|false
   node CodexThreadBridge.js managed list [--all] [--json]
+  node CodexThreadBridge.js managed cleanup [--older-than-minutes 1] [--dry-run] [--json]
   node CodexThreadBridge.js registry [--json]
   node CodexThreadBridge.js stats [--json]
 
@@ -476,6 +478,25 @@ function clearCommand(options) {
 
 function managedCommand(options) {
   const subcommand = String(options._[0] || "list").toLowerCase();
+  if (subcommand === "cleanup" || subcommand === "clean" || subcommand === "prune") {
+    const minutes = Number(options["older-than-minutes"] ?? options.minutes ?? 1);
+    if (!Number.isFinite(minutes) || minutes < 0) fail("Use a non-negative --older-than-minutes value.");
+    const result = cleanupManagedSessions({
+      olderThanMs: minutes * 60 * 1000,
+      dryRun: booleanOption(options, "dry-run", false),
+    });
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    console.log(`${result.dry_run ? "Would remove" : "Removed"} managed sessions: ${result.removed_count}`);
+    for (const session of result.removed) {
+      const age = session.age_ms === null ? "-" : `${Math.round(session.age_ms / 1000)}s`;
+      console.log(`${String(session.agent || "-").padEnd(24)} ${session.thread_id || "-"} status=${session.status || "-"} age=${age}`);
+    }
+    return;
+  }
+
   if (subcommand !== "list" && subcommand !== "status") fail(`Unknown managed command: ${subcommand}`);
   const sessions = readManagedSessions(Boolean(options.all));
   if (options.json) {

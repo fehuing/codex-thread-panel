@@ -69,6 +69,8 @@ node .\CodexThreadBridge.js inbox --thread-id <thread-id>
 node .\CodexThreadBridge.js mark --message-id <message-id> --status done
 node .\CodexThreadBridge.js rules show
 node .\CodexThreadBridge.js managed list
+node .\CodexThreadBridge.js managed cleanup --dry-run
+node .\CodexThreadBridge.js managed cleanup --older-than-minutes 1
 node .\CodexManagedSession.js start --to frontend-agent --permission Normal
 node .\CodexThreadBridge.js stats
 ```
@@ -99,3 +101,5 @@ Phase 3 cannot inject into old windows opened with `O` or manually opened PowerS
 Managed sessions wait briefly before the first injection so a newly resumed Codex TUI can finish loading. Tune with `CODEX_MANAGED_INITIAL_INJECT_DELAY_MS`, `CODEX_MANAGED_SUBMIT_DELAY_MS`, `CODEX_MANAGED_SUBMIT_RETRY_MS`, and `CODEX_MANAGED_SUBMIT_ENTER_COUNT` if a local terminal behaves differently.
 
 Panel-managed sessions restore the last 3 user turns by default, then start Codex with `--no-alt-screen` so the restored context remains visible in the same scrollback. Set `CODEX_MANAGED_HISTORY_TURNS` to tune the count, or `CODEX_MANAGED_HISTORY_REPLAY=0` to disable local replay for manual `CodexManagedSession.js` launches.
+
+Use `node .\CodexThreadBridge.js managed cleanup --dry-run` to preview stale managed-session records, then run without `--dry-run` to remove stale/stopped records older than the selected threshold.

@@ -445,6 +445,49 @@ function readManagedSessions(includeStale = false) {
     .sort((a, b) => String(b.heartbeat_at || "").localeCompare(String(a.heartbeat_at || "")));
 }
 
+function cleanupManagedSessions(options = {}) {
+  const olderThanMs = Math.max(0, Number(options.olderThanMs ?? options.older_than_ms ?? 60000) || 0);
+  const dryRun = Boolean(options.dryRun || options.dry_run);
+  const data = readJsonFile(bridgeManagedSessionsFile(), { version: 3, sessions: {} });
+  const sessions = data?.sessions && typeof data.sessions === "object" ? data.sessions : {};
+  const now = Date.now();
+  const kept = {};
+  const removed = [];
+
+  for (const [id, session] of Object.entries(sessions)) {
+    const heartbeatTime = Date.parse(session.heartbeat_at || session.started_at || "");
+    const ageMs = Number.isFinite(heartbeatTime) ? now - heartbeatTime : Number.POSITIVE_INFINITY;
+    const stopped = session.status === "stopped";
+    const online = ageMs <= 15000 && !stopped;
+    const removable = !online && ageMs >= olderThanMs;
+    if (removable) {
+      removed.push({
+        id,
+        agent: session.agent || "",
+        thread_id: session.thread_id || "",
+        title: session.title || "",
+        status: session.status || "",
+        age_ms: Number.isFinite(ageMs) ? ageMs : null,
+      });
+    } else {
+      kept[id] = session;
+    }
+  }
+
+  if (!dryRun && removed.length) {
+    writeJsonFile(bridgeManagedSessionsFile(), { version: data?.version || 3, sessions: kept });
+    writeBridgeEvent({ type: "managed_cleanup", removed: removed.length, older_than_ms: olderThanMs });
+  }
+
+  return {
+    dry_run: dryRun,
+    older_than_ms: olderThanMs,
+    removed_count: removed.length,
+    kept_count: Object.keys(kept).length,
+    removed,
+  };
+}
+
 function writeManagedSessionHeartbeat(session) {
   const id = singleLine(session.id || `${session.agent || session.thread_id || "managed"}-${process.pid}`);
   if (!id) throw new Error("Managed session id is required.");
@@ -2151,6 +2194,7 @@ module.exports = {
   bridgeHome,
   checkBridgeSendAllowed,
   clearBridgeMessages,
+  cleanupManagedSessions,
   codexHome,
   defaultAgentName,
   findBridgeAgentByThread,
