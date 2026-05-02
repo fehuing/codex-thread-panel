@@ -11,6 +11,7 @@ const HIDE_CURSOR = "\x1b[?25l";
 const SHOW_CURSOR = "\x1b[?25h";
 const ALT_SCREEN = "\x1b[?1049h";
 const MAIN_SCREEN = "\x1b[?1049l";
+const DISABLE_MOUSE_INPUT = "\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1015l";
 
 const COLORS = {
   gray: "\x1b[38;5;250m",
@@ -1717,6 +1718,7 @@ function startPromptThread(thread, permissionMode = PERMISSION_MODES["2"]) {
 }
 
 function handlePromptInput(state, key) {
+  if (isIgnoredTerminalInput(key)) return;
   if (key === "\x1b") {
     state.promptMode = "";
     state.promptBuffer = "";
@@ -1742,6 +1744,14 @@ function handlePromptInput(state, key) {
     if (!action) {
       state.status = "No pending action.";
       return;
+    }
+    if (["open", "managed", "prompt", "new"].includes(action.type)) {
+      const now = Date.now();
+      if (now - Number(state.lastWindowLaunchAt || 0) < 1200) {
+        state.status = "Ignored duplicate launch input.";
+        return;
+      }
+      state.lastWindowLaunchAt = now;
     }
 
     if (action.type === "open" && action.thread) {
@@ -1871,6 +1881,11 @@ function handlePromptInput(state, key) {
 }
 
 function handleKey(state, key, renderer) {
+  if (isIgnoredTerminalInput(key)) {
+    state.status = "Ignored mouse/terminal control input.";
+    return true;
+  }
+
   if (state.promptMode) {
     handlePromptInput(state, key);
     return true;
@@ -2075,6 +2090,7 @@ function main() {
     promptCursor: 0,
     pendingAction: null,
     pendingPermission: null,
+    lastWindowLaunchAt: 0,
     selectedIndex: 0,
     scrollTop: 0,
     nodes: [],
@@ -2106,7 +2122,7 @@ function main() {
       process.stdin.setRawMode(false);
     } catch {
     }
-    process.stdout.write(`${SHOW_CURSOR}${MAIN_SCREEN}${RESET}`);
+    process.stdout.write(`${DISABLE_MOUSE_INPUT}${SHOW_CURSOR}${MAIN_SCREEN}${RESET}`);
   }
 
   process.on("exit", cleanup);
@@ -2116,7 +2132,7 @@ function main() {
     process.exit(0);
   });
 
-  process.stdout.write(`${ALT_SCREEN}${HIDE_CURSOR}\x1b[2J`);
+  process.stdout.write(`${ALT_SCREEN}${HIDE_CURSOR}${DISABLE_MOUSE_INPUT}\x1b[2J`);
   if (process.stdin.isTTY) process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdin.setEncoding("utf8");
@@ -2171,6 +2187,12 @@ function main() {
 function splitKeys(chunk) {
   const keys = [];
   for (let i = 0; i < chunk.length; i++) {
+    if (chunk.startsWith("\x1b[M", i)) {
+      const end = Math.min(chunk.length, i + 6);
+      keys.push(chunk.slice(i, end));
+      i = end - 1;
+      continue;
+    }
     if (chunk[i] === "\x1b" && chunk[i + 1] === "[") {
       let end = i + 2;
       while (end < chunk.length && !/[~A-Za-z]/.test(chunk[end])) {
@@ -2190,6 +2212,16 @@ function splitKeys(chunk) {
     }
   }
   return keys;
+}
+
+function isIgnoredTerminalInput(key) {
+  if (!key) return false;
+  if (key.startsWith("\x1b[M")) return true;
+  if (/^\x1b\[<[\d;]+[mM]$/.test(key)) return true;
+  if (key.startsWith("\x1b") && key.length > 1 && !["\x1b[A", "\x1b[B", "\x1b[C", "\x1b[D"].includes(key)) {
+    return true;
+  }
+  return false;
 }
 
 module.exports = {
