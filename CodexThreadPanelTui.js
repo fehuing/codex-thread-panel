@@ -6,6 +6,13 @@ const os = require("os");
 const path = require("path");
 const cp = require("child_process");
 
+let DatabaseSync = null;
+try {
+  ({ DatabaseSync } = require("node:sqlite"));
+} catch {
+  // Older Node versions can still use an external sqlite3 executable below.
+}
+
 const RESET = "\x1b[0m";
 const HIDE_CURSOR = "\x1b[?25l";
 const SHOW_CURSOR = "\x1b[?25h";
@@ -20,13 +27,369 @@ const COLORS = {
   white: "\x1b[38;5;255m",
   cyan: "\x1b[38;5;81m",
   yellow: "\x1b[38;5;221m",
+  orange: "\x1b[38;5;215m",
   green: "\x1b[38;5;114m",
   red: "\x1b[38;5;203m",
   selected: "\x1b[38;5;16;48;5;250m",
 };
 
+const PINNED_SECTION_CWD = "__codex_thread_panel_pinned__";
+const PINNED_SECTION_NAME = "__codex_thread_panel_pinned__";
+
+const UI_TEXT = Object.freeze({
+  zh: {
+    title: "Codex 线程面板",
+    terminalTooSmall: "终端窗口过小。建议最小尺寸：92 列 x 26 行。",
+    terminalCurrent: "当前：{width} x {height}。请调整终端大小，或按 Q 退出。",
+    projectsThreads: "项目 / 线程",
+    selection: "当前选择",
+    workspace: "工作区",
+    keys: "快捷键",
+    quota: "额度",
+    unknown: "(未知)",
+    unknownProject: "(未知项目)",
+    none: "(无)",
+    shown: "显示",
+    hidden: "隐藏",
+    yes: "是",
+    no: "否",
+    project: "项目",
+    thread: "线程",
+    type: "类型",
+    name: "名称",
+    threads: "线程",
+    state: "状态",
+    expanded: "已展开",
+    collapsed: "已折叠",
+    latest: "最近更新",
+    path: "路径",
+    threadTitle: "标题",
+    updated: "更新时间",
+    model: "模型",
+    tokens: "令牌",
+    archived: "归档",
+    pinned: "置顶",
+    pinnedSection: "置顶",
+    id: "ID",
+    noSelection: "未选择项目或线程。",
+    projectEnter: "Enter / 右方向键：展开项目。左方向键：折叠项目。",
+    projectNew: "N：在此项目中新建 Codex 线程。",
+    pinnedEnter: "Enter / 右方向键：展开置顶会话。左方向键：折叠。",
+    threadOpen: "Enter / O：按权限模式打开此线程。",
+    codexHome: "Codex 主目录",
+    projects: "项目数",
+    totalActiveArchived: "线程：共 {total} | 活跃 {active} | 已归档 {archived}",
+    threadSummary: "共 {total} | 活跃 {active} | 已归档 {archived}",
+    visibleNodes: "可见项",
+    archiveFilter: "归档筛选",
+    search: "搜索",
+    permissionChoose: "选择权限模式：",
+    modeSafe: "安全",
+    modeNormal: "标准",
+    modeAuto: "自动",
+    modeFull: "完全访问",
+    modeSafeLabel: "只读 + 按需授权",
+    modeNormalLabel: "工作区可写 + 按需授权",
+    modeAutoLabel: "工作区可写 + 不再询问",
+    modeFullLabel: "完全访问 + 不再询问",
+    escCancel: "Esc：取消",
+    inputApply: "Enter：确认输入",
+    inputCancel: "Esc：取消输入",
+    backspaceDelete: "Backspace：删除",
+    moveSelection: "上 / 下方向键：移动选择",
+    expandOpen: "Enter / 右方向键：展开或打开",
+    collapseParent: "左方向键：折叠或跳到上级项目",
+    openThread: "O：按权限模式打开选中线程",
+    newThread: "N：按权限模式新建线程",
+    archiveThread: "D：归档选中线程",
+    renameThread: "T：重命名选中线程",
+    openFolder: "F：打开项目文件夹",
+    searchArchive: "S：搜索 | A：切换归档显示",
+    refreshQuit: "R：刷新 | Q：退出",
+    switchLanguage: "L：中英文切换",
+    keyLanguageQuit: "L：中英文切换 | Q：退出",
+    keyNavigation: "导航：上/下移动 | 左折叠 | 右/Enter 展开或打开",
+    keyThreadActions: "线程：O 打开 | N 新建 | T 重命名",
+    keyOtherActions: "D 归档 | F 文件夹 | S 搜索 | A 归档显示 | R 刷新",
+    quit: "Q：退出",
+    refresh: "R：刷新数据",
+    searchShortcut: "S：搜索",
+    archiveToggle: "A：切换归档显示",
+    quotaUnavailable: "暂未找到额度信息。",
+    quotaHint: "启动或继续 Codex 后将自动刷新。",
+    now: "当前时间",
+    planLastQuota: "套餐：{plan} | 最近额度事件：{time}",
+    quotaRemaining: "{window}：剩余 {remaining}% | 已用 {used}% | {health} | {reset}",
+    quotaGood: "额度良好",
+    quotaModerate: "额度中等",
+    quotaCritical: "额度严重",
+    fiveHourLimit: "5 小时额度",
+    weeklyLimit: "每周额度",
+    minuteLimit: "{minutes} 分钟额度",
+    resetUnknown: "重置时间未知",
+    resetReached: "已到重置时间（{time}）",
+    resetDays: "{days}天{hours}小时后重置（{time}）",
+    resetHours: "{hours}小时{minutes}分钟后重置（{time}）",
+    resetMinutes: "{minutes}分钟{seconds}秒后重置（{time}）",
+    moreAbove: "^ 上方还有更多",
+    moreBelow: "v 下方还有更多",
+    archiveMarker: "归",
+    ready: "就绪",
+    searchPrompt: "搜索：",
+    pathPrompt: "项目路径：",
+    renamePrompt: "重命名 >",
+    permissionPrompt: "选择权限：1 安全，2 标准，3 自动，4 完全访问，Esc 取消",
+    initialStatus: "Enter 展开项目；在线程上按 Enter 可在新 PowerShell 窗口中打开。",
+    ignoredTerminalInput: "已忽略鼠标或终端控制输入。",
+    inputCancelled: "已取消输入。",
+    choosePermission: "请选择 1 安全、2 标准、3 自动或 4 完全访问；Esc 取消。",
+    noPendingAction: "没有待执行的操作。",
+    duplicateLaunch: "已忽略重复的启动输入。",
+    openedThread: "已用{mode}模式打开线程：{title}",
+    openThreadFailed: "打开线程失败。",
+    startedThread: "已用{mode}模式启动新 Codex 线程：{path}",
+    startThreadFailed: "启动新线程失败：{path}",
+    enterProjectPath: "请输入{mode}模式的项目路径。",
+    searchApplied: "已应用搜索：{value}",
+    searchCleared: "已清除搜索。",
+    startedThreadIn: "已在此路径启动新 Codex 线程：{path}",
+    invalidProjectPath: "项目路径无效：{path}",
+    renamedThread: "已重命名线程：{title}",
+    renameFailed: "重命名失败。",
+    expandedProject: "已展开项目：{name}",
+    collapsedProject: "已折叠项目：{name}",
+    chooseThreadPermission: "请为线程选择权限模式：{title}",
+    selectThreadFirst: "请先选择一个线程。",
+    chooseNewPermission: "请为新线程选择权限模式：{path}",
+    choosePathPermission: "请选择权限模式，然后输入项目路径。",
+    openedFolder: "已打开文件夹：{path}",
+    invalidProjectFolder: "当前选择没有有效的项目文件夹。",
+    selectThreadArchive: "请选择要归档的线程。",
+    archivedThread: "已归档线程：{title}",
+    archiveFailed: "归档失败。",
+    selectThreadRename: "请选择要重命名的线程。",
+    enterNewTitle: "请输入新的 Codex 标题：{title}",
+    archivedShown: "已显示归档线程。",
+    archivedHidden: "已隐藏归档线程。",
+    refreshedData: "数据已刷新。",
+    expandedAll: "已展开所有可见项目。",
+    collapsedAll: "已折叠所有项目。",
+    unhandledKey: "未处理的按键。当前选择：{name}",
+    languageChanged: "已切换为{language}界面。",
+    languageChinese: "中文",
+    languageEnglish: "英文",
+  },
+  en: {
+    title: "Codex Thread Panel",
+    terminalTooSmall: "Terminal too small. Recommended minimum: 92 columns x 26 rows.",
+    terminalCurrent: "Current: {width} x {height}. Resize terminal or press Q to exit.",
+    projectsThreads: "Projects / Threads",
+    selection: "Selection",
+    workspace: "Workspace",
+    keys: "Keys",
+    quota: "Quota",
+    unknown: "(unknown)",
+    unknownProject: "(unknown project)",
+    none: "(none)",
+    shown: "shown",
+    hidden: "hidden",
+    yes: "yes",
+    no: "no",
+    project: "project",
+    thread: "thread",
+    type: "Type",
+    name: "Name",
+    threads: "Threads",
+    state: "State",
+    expanded: "expanded",
+    collapsed: "collapsed",
+    latest: "Latest",
+    path: "Path",
+    threadTitle: "Title",
+    updated: "Updated",
+    model: "Model",
+    tokens: "Tokens",
+    archived: "Archived",
+    pinned: "Pinned",
+    pinnedSection: "Pinned",
+    id: "Id",
+    noSelection: "No selection.",
+    projectEnter: "Enter/Right expands. Left collapses.",
+    projectNew: "N starts a new Codex thread here.",
+    pinnedEnter: "Enter/Right expands pinned threads. Left collapses.",
+    threadOpen: "Enter/O opens this thread with permissions.",
+    codexHome: "CodexHome",
+    projects: "Projects",
+    totalActiveArchived: "Threads: {total} total | {active} active | {archived} archived",
+    threadSummary: "{total} total | {active} active | {archived} archived",
+    visibleNodes: "Visible nodes",
+    archiveFilter: "Archive filter",
+    search: "Search",
+    permissionChoose: "Choose permission mode:",
+    modeSafe: "Safe",
+    modeNormal: "Normal",
+    modeAuto: "Auto",
+    modeFull: "Full",
+    modeSafeLabel: "read-only + on-request",
+    modeNormalLabel: "workspace-write + on-request",
+    modeAutoLabel: "workspace-write + never",
+    modeFullLabel: "danger-full-access + never",
+    escCancel: "Esc: cancel",
+    inputApply: "Enter: apply input",
+    inputCancel: "Esc: cancel input",
+    backspaceDelete: "Backspace: delete",
+    moveSelection: "Up/Down: move selection",
+    expandOpen: "Enter/Right: expand or open",
+    collapseParent: "Left: collapse or jump to parent",
+    openThread: "O: open selected thread with permissions",
+    newThread: "N: new thread with permissions",
+    archiveThread: "D: archive selected thread",
+    renameThread: "T: rename selected thread",
+    openFolder: "F: open folder",
+    searchArchive: "S: search | A: archive toggle",
+    refreshQuit: "R: refresh | Q: quit",
+    switchLanguage: "L: switch Chinese / English",
+    keyLanguageQuit: "L: switch Chinese / English | Q: quit",
+    keyNavigation: "Navigate: Up/Down move | Left collapse | Right/Enter act",
+    keyThreadActions: "Threads: O open | N new | T rename",
+    keyOtherActions: "D archive | F folder | S search | A archive view | R refresh",
+    quit: "Q: quit",
+    refresh: "R: refresh data",
+    searchShortcut: "S: search",
+    archiveToggle: "A: toggle archived threads",
+    quotaUnavailable: "Quota: not found yet.",
+    quotaHint: "Start or resume Codex to refresh.",
+    now: "Now",
+    planLastQuota: "Plan: {plan} | Last quota event: {time}",
+    quotaRemaining: "{window} remaining: {remaining}% | used: {used}% | {health} | {reset}",
+    quotaGood: "quota healthy",
+    quotaModerate: "quota moderate",
+    quotaCritical: "quota critical",
+    fiveHourLimit: "5h limit",
+    weeklyLimit: "weekly limit",
+    minuteLimit: "{minutes}m limit",
+    resetUnknown: "reset unknown",
+    resetReached: "reset reached ({time})",
+    resetDays: "resets in {days}d {hours}h ({time})",
+    resetHours: "resets in {hours}h {minutes}m ({time})",
+    resetMinutes: "resets in {minutes}m {seconds}s ({time})",
+    moreAbove: "^ more above",
+    moreBelow: "v more below",
+    archiveMarker: "A",
+    ready: "Ready",
+    searchPrompt: "Search:",
+    pathPrompt: "Project path:",
+    renamePrompt: "Rename >",
+    permissionPrompt: "Select permission: 1 Safe, 2 Normal, 3 Auto, 4 Full, Esc cancel",
+    initialStatus: "Enter expands a project. Enter on a thread opens it in a new PowerShell.",
+    ignoredTerminalInput: "Ignored mouse/terminal control input.",
+    inputCancelled: "Input cancelled.",
+    choosePermission: "Choose 1 Safe, 2 Normal, 3 Auto, 4 Full. Esc cancels.",
+    noPendingAction: "No pending action.",
+    duplicateLaunch: "Ignored duplicate launch input.",
+    openedThread: "Opened thread with {mode}: {title}",
+    openThreadFailed: "Failed to open thread.",
+    startedThread: "Started new Codex thread with {mode}: {path}",
+    startThreadFailed: "Failed to start new thread: {path}",
+    enterProjectPath: "Enter project path for {mode} mode.",
+    searchApplied: "Search applied: {value}",
+    searchCleared: "Search cleared.",
+    startedThreadIn: "Started new Codex thread in: {path}",
+    invalidProjectPath: "Invalid project path: {path}",
+    renamedThread: "Renamed thread: {title}",
+    renameFailed: "Rename failed.",
+    expandedProject: "Expanded project: {name}",
+    collapsedProject: "Collapsed project: {name}",
+    chooseThreadPermission: "Choose permission mode for: {title}",
+    selectThreadFirst: "Select a thread first.",
+    chooseNewPermission: "Choose permission mode for new thread: {path}",
+    choosePathPermission: "Choose permission mode, then enter project path.",
+    openedFolder: "Opened folder: {path}",
+    invalidProjectFolder: "No valid project folder for this selection.",
+    selectThreadArchive: "Select a thread to archive.",
+    archivedThread: "Archived thread: {title}",
+    archiveFailed: "Archive failed.",
+    selectThreadRename: "Select a thread to rename.",
+    enterNewTitle: "Enter a new Codex title for: {title}",
+    archivedShown: "Archived threads are shown.",
+    archivedHidden: "Archived threads are hidden.",
+    refreshedData: "Refreshed data.",
+    expandedAll: "Expanded all visible projects.",
+    collapsedAll: "Collapsed all projects.",
+    unhandledKey: "Unhandled key. Selection: {name}",
+    languageChanged: "Switched to {language}.",
+    languageChinese: "Chinese",
+    languageEnglish: "English",
+  },
+});
+
+function ui(language, key, values = {}) {
+  const template = UI_TEXT[language]?.[key] || UI_TEXT.en[key] || key;
+  return template.replace(/\{(\w+)\}/g, (_match, name) => String(values[name] ?? ""));
+}
+
+function displayProjectName(name, language) {
+  if (name === PINNED_SECTION_NAME) return ui(language, "pinnedSection");
+  return name === "(unknown)" || name === "(unknown project)" ? ui(language, "unknownProject") : name;
+}
+
+function labelValueText(label, value, labelWidth, language) {
+  const separator = language === "zh" ? "：" : ": ";
+  return `${pad(label, labelWidth)}${separator}${value}`;
+}
+
+function labelValueRows(language, rows) {
+  const labelWidth = Math.max(...rows.map((row) => displayWidth(row.label)));
+  return rows.map((row) => ({
+    text: labelValueText(row.label, row.value, labelWidth, language),
+    color: row.color,
+  }));
+}
+
+function permissionModeName(mode, language) {
+  return ui(language, `mode${mode?.id || "Normal"}`);
+}
+
+function permissionModeLabel(mode, language) {
+  return ui(language, `mode${mode?.id || "Normal"}Label`);
+}
+
 function codexHome() {
   return process.env.CODEX_HOME || path.join(os.homedir(), ".codex");
+}
+
+function globalStatePath(home = codexHome()) {
+  return path.join(home, ".codex-global-state.json");
+}
+
+function uniqueThreadIds(values) {
+  const seen = new Set();
+  return (Array.isArray(values) ? values : []).filter((value) => {
+    const id = String(value || "").trim();
+    if (!id || seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
+function readPinnedThreadIds(home = codexHome()) {
+  try {
+    const state = JSON.parse(fs.readFileSync(globalStatePath(home), "utf8"));
+    if (Array.isArray(state?.["pinned-thread-ids"])) return uniqueThreadIds(state["pinned-thread-ids"]);
+    const hostIds = state?.["app-server-migrated-pinned-thread-ids-by-host"]?.[`local:${home}`];
+    if (Array.isArray(hostIds)) return uniqueThreadIds(hostIds);
+    const desktopIds = state?.["electron-persisted-atom-state"]?.["app-server-pinned-thread-order-v1"];
+    return uniqueThreadIds(desktopIds);
+  } catch {
+    return [];
+  }
+}
+
+function displayPlan(planType, language) {
+  const plan = String(planType || "-").toLowerCase();
+  if (plan === "pro") return language === "zh" ? "Pro $200/月 · 20x" : "Pro $200/mo · 20x";
+  if (plan === "prolite") return language === "zh" ? "Pro $100/月 · 5x" : "Pro $100/mo · 5x";
+  return String(planType || "-");
 }
 
 function normalizeCodexPath(value) {
@@ -56,13 +419,64 @@ function isMojibakeTitle(value) {
   return /^\?{3,}$/.test(text) || text.includes("\uFFFD");
 }
 
+const GRAPHEME_SEGMENTER = typeof Intl !== "undefined" && Intl.Segmenter
+  ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+  : null;
+const COMBINING_MARK = /^\p{Mark}$/u;
+const EXTENDED_PICTOGRAPHIC = /\p{Extended_Pictographic}/u;
+
+function graphemeClusters(value) {
+  const text = String(value || "");
+  if (!GRAPHEME_SEGMENTER) return Array.from(text);
+  return Array.from(GRAPHEME_SEGMENTER.segment(text), ({ segment }) => segment);
+}
+
+function isFullwidthCodePoint(code) {
+  return code >= 0x1100 && (
+    code <= 0x115f ||
+    code === 0x2329 ||
+    code === 0x232a ||
+    (code >= 0x2e80 && code <= 0xa4cf && code !== 0x303f) ||
+    (code >= 0xac00 && code <= 0xd7a3) ||
+    (code >= 0xf900 && code <= 0xfaff) ||
+    (code >= 0xfe10 && code <= 0xfe19) ||
+    (code >= 0xfe30 && code <= 0xfe6f) ||
+    (code >= 0xff00 && code <= 0xff60) ||
+    (code >= 0xffe0 && code <= 0xffe6) ||
+    (code >= 0x1b000 && code <= 0x1b001) ||
+    (code >= 0x1f200 && code <= 0x1f251) ||
+    (code >= 0x20000 && code <= 0x3fffd)
+  );
+}
+
+function codePointWidth(ch) {
+  const code = ch.codePointAt(0);
+  if (
+    code <= 0x1f ||
+    (code >= 0x7f && code <= 0x9f) ||
+    code === 0x200c ||
+    code === 0x200d ||
+    (code >= 0xfe00 && code <= 0xfe0f) ||
+    (code >= 0xe0100 && code <= 0xe01ef) ||
+    COMBINING_MARK.test(ch)
+  ) return 0;
+  return isFullwidthCodePoint(code) ? 2 : 1;
+}
+
+function graphemeWidth(grapheme) {
+  const codePoints = Array.from(grapheme);
+  if (
+    EXTENDED_PICTOGRAPHIC.test(grapheme) ||
+    codePoints.some((ch) => {
+      const code = ch.codePointAt(0);
+      return code >= 0x1f1e6 && code <= 0x1f1ff;
+    })
+  ) return 2;
+  return codePoints.reduce((width, ch) => width + codePointWidth(ch), 0);
+}
+
 function displayWidth(value) {
-  let width = 0;
-  for (const ch of String(value || "")) {
-    const code = ch.codePointAt(0);
-    width += code > 0x7f ? 2 : 1;
-  }
-  return width;
+  return graphemeClusters(value).reduce((width, grapheme) => width + graphemeWidth(grapheme), 0);
 }
 
 function truncate(value, maxWidth) {
@@ -72,11 +486,11 @@ function truncate(value, maxWidth) {
   let width = 0;
   let out = "";
   const target = maxWidth - 3;
-  for (const ch of text) {
-    const charWidth = ch.codePointAt(0) > 0x7f ? 2 : 1;
-    if (width + charWidth > target) break;
-    out += ch;
-    width += charWidth;
+  for (const grapheme of graphemeClusters(text)) {
+    const widthOfGrapheme = graphemeWidth(grapheme);
+    if (width + widthOfGrapheme > target) break;
+    out += grapheme;
+    width += widthOfGrapheme;
   }
   return `${out}...`;
 }
@@ -85,6 +499,19 @@ function pad(value, width) {
   const text = truncate(value, width);
   const current = displayWidth(text);
   return current < width ? text + " ".repeat(width - current) : text;
+}
+
+function padLeft(value, width) {
+  const text = truncate(value, width);
+  const current = displayWidth(text);
+  return current < width ? " ".repeat(width - current) + text : text;
+}
+
+function formatColumns(columns) {
+  return columns.map(({ text, width, align = "left" }) => {
+    if (!Number.isFinite(width)) return displayLine(text);
+    return align === "right" ? padLeft(text, width) : pad(text, width);
+  }).join("");
 }
 
 function style(value, color) {
@@ -127,7 +554,7 @@ function formatDate(value, withSeconds = false) {
 
 function projectName(cwd) {
   const normalized = normalizeCodexPath(cwd);
-  if (!normalized) return "(unknown project)";
+  if (!normalized) return "(unknown)";
   const trimmed = normalized.replace(/[\\/]+$/, "");
   return path.basename(trimmed) || normalized;
 }
@@ -160,7 +587,64 @@ function walkFiles(root, suffix = ".jsonl") {
   return files;
 }
 
+function readFilePrefix(filePath, maxBytes = 256 * 1024) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const size = fs.fstatSync(fd).size;
+    const bytes = Math.min(size, maxBytes);
+    if (!bytes) return "";
+    const buffer = Buffer.allocUnsafe(bytes);
+    const read = fs.readSync(fd, buffer, 0, bytes, 0);
+    return buffer.toString("utf8", 0, read);
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+      }
+    }
+  }
+}
+
+function readFileTail(filePath, maxBytes = 256 * 1024) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const size = fs.fstatSync(fd).size;
+    const bytes = Math.min(size, maxBytes);
+    if (!bytes) return "";
+    const buffer = Buffer.allocUnsafe(bytes);
+    const read = fs.readSync(fd, buffer, 0, bytes, size - bytes);
+    return buffer.toString("utf8", 0, read);
+  } catch {
+    return "";
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+      }
+    }
+  }
+}
+
 function runSqliteJson(dbPath, query) {
+  if (DatabaseSync) {
+    let db;
+    try {
+      db = new DatabaseSync(dbPath, { readOnly: true });
+      return db.prepare(query).all();
+    } catch {
+    } finally {
+      try {
+        db?.close();
+      } catch {
+      }
+    }
+  }
   try {
     const output = cp.execFileSync("sqlite3", ["-json", dbPath, query], {
       encoding: "utf8",
@@ -175,6 +659,20 @@ function runSqliteJson(dbPath, query) {
 }
 
 function runSqliteExec(dbPath, query) {
+  if (DatabaseSync) {
+    let db;
+    try {
+      db = new DatabaseSync(dbPath);
+      db.exec(query);
+      return true;
+    } catch {
+    } finally {
+      try {
+        db?.close();
+      } catch {
+      }
+    }
+  }
   try {
     cp.execFileSync("sqlite3", [dbPath], {
       input: query,
@@ -221,12 +719,8 @@ function extractTextFromContent(content) {
 }
 
 function scanSessionFile(filePath) {
-  let text = "";
-  try {
-    text = fs.readFileSync(filePath, "utf8");
-  } catch {
-    return null;
-  }
+  const text = readFilePrefix(filePath);
+  if (!text) return null;
 
   const result = {
     id: "",
@@ -286,19 +780,22 @@ function readSessionIndex(home) {
   return byId;
 }
 
-function readTitleOverrides(home) {
-  const filePath = path.join(home, "thread_title_overrides.json");
-  const map = new Map();
-  if (!fs.existsSync(filePath)) return map;
+function fileSignature(filePath) {
   try {
-    const raw = fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, "");
-    const data = JSON.parse(raw);
-    for (const [id, title] of Object.entries(data || {})) {
-      if (id && title) map.set(id, String(title));
-    }
+    const stat = fs.statSync(filePath);
+    return `${stat.mtimeMs}:${stat.size}`;
   } catch {
+    return "";
   }
-  return map;
+}
+
+function threadDataSignature(home = codexHome()) {
+  return [
+    path.join(home, "state_5.sqlite"),
+    path.join(home, "state_5.sqlite-wal"),
+    path.join(home, "session_index.jsonl"),
+    globalStatePath(home),
+  ].map(fileSignature).join("|");
 }
 
 function rewriteSessionIndexTitle(id, title) {
@@ -339,25 +836,44 @@ function archiveThread(thread) {
 function renameThread(thread, title) {
   const nextTitle = singleLine(title);
   if (!thread?.id || !nextTitle) return false;
-  return rewriteSessionIndexTitle(thread.id, nextTitle);
+  const dbPath = path.join(codexHome(), "state_5.sqlite");
+  if (!fs.existsSync(dbPath)) return false;
+  const renamed = runSqliteExec(
+    dbPath,
+    `update threads set name=${sqliteLiteral(nextTitle)} where id=${sqliteLiteral(thread.id)};`,
+  );
+  if (!renamed) return false;
+  rewriteSessionIndexTitle(thread.id, nextTitle);
+  return true;
 }
 
 function readSqliteThreads(home) {
   const dbPath = path.join(home, "state_5.sqlite");
   if (!fs.existsSync(dbPath)) return new Map();
-  const rows = runSqliteJson(
+  let rows = runSqliteJson(
     dbPath,
-    `select id, title, cwd, archived, rollout_path, tokens_used, model, reasoning_effort,
+    `select id, name, title, thread_source, cwd, archived, rollout_path, tokens_used, model, reasoning_effort,
             updated_at_ms, updated_at, first_user_message
        from threads
       order by coalesce(updated_at_ms, updated_at * 1000) desc, id desc;`,
   );
+  if (rows.length === 0) {
+    rows = runSqliteJson(
+      dbPath,
+      `select id, title, cwd, archived, rollout_path, tokens_used, model, reasoning_effort,
+              updated_at_ms, updated_at, first_user_message
+         from threads
+        order by coalesce(updated_at_ms, updated_at * 1000) desc, id desc;`,
+    );
+  }
   const byId = new Map();
   for (const row of rows) {
     if (!row.id) continue;
     byId.set(row.id, {
       id: row.id,
+      nativeTitle: row.name || "",
       title: row.title || "",
+      threadSource: row.thread_source || "",
       cwd: normalizeCodexPath(row.cwd || ""),
       archived: Boolean(row.archived),
       sourceFile: row.rollout_path || "",
@@ -376,17 +892,21 @@ function readThreads() {
   const home = codexHome();
   const byId = readSqliteThreads(home);
   const index = readSessionIndex(home);
-  const titleOverrides = readTitleOverrides(home);
-  const sessionRoots = [path.join(home, "sessions"), path.join(home, "archived_sessions")];
-  const sessionFiles = sessionRoots.flatMap((root) => walkFiles(root));
+  const pinnedIds = readPinnedThreadIds(home);
+  const pinnedOrder = new Map(pinnedIds.map((id, index) => [id, index]));
 
   const metaById = new Map();
-  for (const file of sessionFiles) {
-    const meta = scanSessionFile(file.path);
-    if (!meta) continue;
-    const existing = metaById.get(meta.id);
-    if (!existing || ((meta.timestamp || 0) > (existing.timestamp || 0))) {
-      metaById.set(meta.id, meta);
+  // SQLite and session_index already hold the data needed by the list view.
+  // Only recover from rollout files when neither source is available.
+  if (byId.size === 0 && index.size === 0) {
+    const sessionRoots = [path.join(home, "sessions"), path.join(home, "archived_sessions")];
+    for (const file of sessionRoots.flatMap((root) => walkFiles(root))) {
+      const meta = scanSessionFile(file.path);
+      if (!meta) continue;
+      const existing = metaById.get(meta.id);
+      if (!existing || ((meta.timestamp || 0) > (existing.timestamp || 0))) {
+        metaById.set(meta.id, meta);
+      }
     }
   }
 
@@ -395,7 +915,7 @@ function readThreads() {
     const meta = metaById.get(id);
     if (current) {
       current.indexTitle = item.title;
-      if (item.updated) current.updated = item.updated;
+      if (item.updated && (!current.updated || item.updated > current.updated)) current.updated = item.updated;
       if (meta) {
         current.cwd ||= meta.cwd;
         current.sourceFile ||= meta.sourceFile;
@@ -405,8 +925,10 @@ function readThreads() {
     } else {
       byId.set(id, {
         id,
+        nativeTitle: "",
         title: item.title || "",
         indexTitle: item.title || "",
+        threadSource: "",
         cwd: meta ? meta.cwd : "",
         archived: meta ? meta.archived : false,
         sourceFile: meta ? meta.sourceFile : "",
@@ -424,8 +946,10 @@ function readThreads() {
     if (byId.has(id)) continue;
     byId.set(id, {
       id,
+      nativeTitle: "",
       title: "",
       indexTitle: "",
+      threadSource: "",
       cwd: meta.cwd || "",
       archived: meta.archived,
       sourceFile: meta.sourceFile,
@@ -439,14 +963,20 @@ function readThreads() {
   }
 
   return Array.from(byId.values())
+    // Hide internal guardian reviews and unnamed delegated helpers from the task list.
+    .filter((item) => item.threadSource !== "guardian_review")
+    .filter((item) => item.threadSource !== "subagent" || Boolean(singleLine(item.nativeTitle) || singleLine(item.indexTitle)))
     .map((item) => {
-      const title = chooseTitle(titleOverrides.get(item.id), item.indexTitle, item.title, item.firstUserMessage);
+      const title = chooseTitle(item.nativeTitle, item.indexTitle, item.title, item.firstUserMessage);
       return {
         id: item.id,
         title,
+        threadSource: item.threadSource || "",
         cwd: normalizeCodexPath(item.cwd || ""),
         project: projectName(item.cwd || ""),
         archived: Boolean(item.archived),
+        pinned: pinnedOrder.has(item.id),
+        pinnedOrder: pinnedOrder.get(item.id) ?? -1,
         sourceFile: item.sourceFile || "",
         tokensUsed: Number(item.tokensUsed || 0),
         model: item.model || "",
@@ -460,18 +990,18 @@ function readThreads() {
 }
 
 function findLatestRateLine(filePath) {
-  let text = "";
-  try {
-    text = fs.readFileSync(filePath, "utf8");
-  } catch {
-    return null;
-  }
+  const text = readFileTail(filePath);
+  if (!text) return null;
   const needle = '"rate_limits"';
   const index = text.lastIndexOf(needle);
   if (index < 0) return null;
   const start = text.lastIndexOf("\n", index);
   const end = text.indexOf("\n", index);
   return text.slice(start < 0 ? 0 : start + 1, end < 0 ? text.length : end);
+}
+
+function isAccountQuota(rate) {
+  return rate?.limit_id === "codex" && Number(rate.primary?.window_minutes) > 0;
 }
 
 function readLatestQuota(maxFiles = 20) {
@@ -489,14 +1019,13 @@ function readLatestQuota(maxFiles = 20) {
     if (!line) continue;
     const obj = parseJsonLine(line);
     const rate = obj?.payload?.rate_limits;
-    if (!rate) continue;
+    if (!isAccountQuota(rate)) continue;
     const timestamp = toDate(obj.timestamp);
     if (!latest || (timestamp?.getTime() || 0) > (latest.timestamp?.getTime() || 0)) {
       latest = { timestamp, rate, file: file.path };
     }
   }
 
-  if (!latest && maxFiles < files.length) return readLatestQuota(files.length);
   return latest;
 }
 
@@ -509,36 +1038,77 @@ function remainingPercent(value) {
   return Math.max(0, Math.min(100, 100 - safePercent(value)));
 }
 
-function quotaName(minutes) {
-  const n = Number(minutes || 0);
-  if (n === 300) return "5h limit";
-  if (n === 10080) return "weekly limit";
-  return `${n}m limit`;
+function quotaHealth(window, nowMs = Date.now()) {
+  const remaining = remainingPercent(window?.used_percent);
+  const durationMs = Number(window?.window_minutes) * 60 * 1000;
+  const resetMs = Number(window?.resets_at) * 1000;
+  const hasResetSchedule = Number.isFinite(durationMs) && durationMs > 0
+    && Number.isFinite(resetMs) && resetMs > nowMs;
+
+  if (!hasResetSchedule) {
+    if (remaining <= 10) return "critical";
+    if (remaining <= 30) return "moderate";
+    return "good";
+  }
+
+  const timeRemaining = Math.max(0, Math.min(100, ((resetMs - nowMs) / durationMs) * 100));
+  const pacingGap = remaining - timeRemaining;
+
+  if (remaining === 0 || (remaining <= 5 && timeRemaining > 15) || pacingGap < -25) {
+    return "critical";
+  }
+  if ((remaining <= 15 && timeRemaining > 35) || pacingGap < -10) {
+    return "moderate";
+  }
+  return "good";
 }
 
-function resetInfo(epochSeconds) {
-  if (!epochSeconds) return "reset unknown";
+function quotaHealthText(language, health) {
+  if (health === "critical") return ui(language, "quotaCritical");
+  if (health === "moderate") return ui(language, "quotaModerate");
+  return ui(language, "quotaGood");
+}
+
+function quotaHealthColor(health) {
+  if (health === "critical") return COLORS.red;
+  if (health === "moderate") return COLORS.orange;
+  return COLORS.green;
+}
+
+function quotaName(minutes, language) {
+  const n = Number(minutes || 0);
+  if (n === 300) return ui(language, "fiveHourLimit");
+  if (n === 10080) return ui(language, "weeklyLimit");
+  return ui(language, "minuteLimit", { minutes: n });
+}
+
+function resetInfo(epochSeconds, language) {
+  if (!epochSeconds) return ui(language, "resetUnknown");
   const reset = new Date(Number(epochSeconds) * 1000);
   const diff = reset.getTime() - Date.now();
-  if (diff <= 0) return `reset reached (${formatDate(reset).slice(11)})`;
+  if (diff <= 0) return ui(language, "resetReached", { time: formatDate(reset).slice(11) });
   const totalSeconds = Math.floor(diff / 1000);
   const days = Math.floor(totalSeconds / 86400);
   const hours = Math.floor((totalSeconds % 86400) / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  if (days > 0) return `resets in ${days}d ${hours}h (${formatDate(reset).slice(5)})`;
-  if (hours > 0) return `resets in ${hours}h ${minutes}m (${formatDate(reset).slice(11)})`;
-  return `resets in ${minutes}m ${seconds}s (${formatDate(reset).slice(11)})`;
+  if (days > 0) return ui(language, "resetDays", { days, hours, time: formatDate(reset).slice(5) });
+  if (hours > 0) return ui(language, "resetHours", { hours, minutes, time: formatDate(reset).slice(11) });
+  return ui(language, "resetMinutes", { minutes, seconds, time: formatDate(reset).slice(11) });
 }
 
-function groupProjects(threads, includeArchived, search) {
+function filterThreads(threads, includeArchived, search) {
   const query = singleLine(search).toLowerCase();
-  const filtered = threads.filter((thread) => {
+  return threads.filter((thread) => {
     if (!includeArchived && thread.archived) return false;
     if (!query) return true;
     const haystack = `${thread.title}\n${thread.cwd}\n${thread.id}\n${thread.model}\n${thread.project}`.toLowerCase();
     return haystack.includes(query);
   });
+}
+
+function groupProjects(threads, includeArchived, search) {
+  const filtered = filterThreads(threads, includeArchived, search);
   const map = new Map();
   for (const thread of filtered) {
     const key = thread.cwd || "(unknown)";
@@ -566,7 +1136,29 @@ function groupProjects(threads, includeArchived, search) {
 
 function buildNodes(threads, expanded, includeArchived, search) {
   const nodes = [];
-  for (const project of groupProjects(threads, includeArchived, search)) {
+  const visibleThreads = filterThreads(threads, includeArchived, search);
+  const pinnedThreads = visibleThreads
+    .filter((thread) => thread.pinned)
+    .sort((a, b) => a.pinnedOrder - b.pinnedOrder);
+  if (pinnedThreads.length) {
+    const pinnedProject = {
+      cwd: PINNED_SECTION_CWD,
+      name: PINNED_SECTION_NAME,
+      threads: pinnedThreads,
+      latest: pinnedThreads.reduce((latest, thread) => (
+        !latest || (thread.updated?.getTime() || 0) > (latest.getTime() || 0) ? thread.updated : latest
+      ), null),
+    };
+    const isExpanded = expanded.has(PINNED_SECTION_CWD);
+    nodes.push({ type: "pinned", project: pinnedProject, cwd: PINNED_SECTION_CWD, expanded: isExpanded });
+    if (isExpanded) {
+      for (const thread of pinnedThreads) {
+        nodes.push({ type: "thread", project: pinnedProject, thread, cwd: PINNED_SECTION_CWD });
+      }
+    }
+  }
+
+  for (const project of groupProjects(visibleThreads.filter((thread) => !thread.pinned), true, "")) {
     const isExpanded = expanded.has(project.cwd);
     nodes.push({ type: "project", project, cwd: project.cwd, expanded: isExpanded });
     if (isExpanded) {
@@ -604,98 +1196,136 @@ function selectedNode(nodes, index) {
   return nodes.length && index >= 0 && index < nodes.length ? nodes[index] : null;
 }
 
-function detailLines(node) {
-  if (!node) return [{ text: "No selection.", color: COLORS.yellow }];
-  if (node.type === "project") {
+function detailLines(node, language) {
+  if (!node) return [{ text: ui(language, "noSelection"), color: COLORS.yellow }];
+  if (node.type === "pinned") {
     const p = node.project;
     return [
-      { text: "Type: project", color: COLORS.dark },
-      { text: `Name: ${p.name}`, color: COLORS.white },
-      { text: `Threads: ${p.threads.length}`, color: COLORS.gray },
-      { text: `State: ${node.expanded ? "expanded" : "collapsed"}`, color: COLORS.gray },
-      { text: `Latest: ${formatDate(p.latest)}`, color: COLORS.gray },
-      { text: `Path: ${p.cwd || "(unknown)"}`, color: COLORS.gray },
-      { text: "Enter/Right expands. Left collapses.", color: COLORS.dark },
-      { text: "N starts a new Codex thread here.", color: COLORS.dark },
+      ...labelValueRows(language, [
+        { label: ui(language, "type"), value: ui(language, "pinnedSection"), color: COLORS.dark },
+        { label: ui(language, "threads"), value: p.threads.length, color: COLORS.gray },
+        { label: ui(language, "state"), value: ui(language, node.expanded ? "expanded" : "collapsed"), color: COLORS.gray },
+      ]),
+      { text: ui(language, "pinnedEnter"), color: COLORS.dark },
+    ];
+  }
+  if (node.type === "project") {
+    const p = node.project;
+    const name = displayProjectName(p.name, language);
+    return [
+      ...labelValueRows(language, [
+        { label: ui(language, "type"), value: ui(language, "project"), color: COLORS.dark },
+        { label: ui(language, "name"), value: name, color: COLORS.white },
+        { label: ui(language, "threads"), value: p.threads.length, color: COLORS.gray },
+        { label: ui(language, "state"), value: ui(language, node.expanded ? "expanded" : "collapsed"), color: COLORS.gray },
+        { label: ui(language, "latest"), value: formatDate(p.latest), color: COLORS.gray },
+        { label: ui(language, "path"), value: p.cwd || ui(language, "unknown"), color: COLORS.gray },
+      ]),
+      { text: ui(language, "projectEnter"), color: COLORS.dark },
+      { text: ui(language, "projectNew"), color: COLORS.dark },
     ];
   }
   const t = node.thread;
   return [
-    { text: "Type: thread", color: COLORS.dark },
-    { text: `Title: ${t.title}`, color: COLORS.white },
-    { text: `Updated: ${t.updatedText}`, color: COLORS.gray },
-    { text: `Project: ${t.project}`, color: COLORS.gray },
-    { text: `Model: ${t.model || "-"}`, color: COLORS.gray },
-    { text: `Tokens: ${t.tokensUsed ? t.tokensUsed.toLocaleString() : "-"}`, color: COLORS.gray },
-    { text: `Archived: ${t.archived ? "yes" : "no"}`, color: t.archived ? COLORS.yellow : COLORS.gray },
-    { text: `Id: ${t.id}`, color: COLORS.dark },
-    { text: `Path: ${t.cwd || "(unknown)"}`, color: COLORS.gray },
-    { text: "Enter/O opens this thread.", color: COLORS.dark },
+    ...labelValueRows(language, [
+      { label: ui(language, "type"), value: ui(language, "thread"), color: COLORS.dark },
+      { label: ui(language, "threadTitle"), value: t.title, color: COLORS.white },
+      { label: ui(language, "updated"), value: t.updatedText, color: COLORS.gray },
+      { label: ui(language, "project"), value: displayProjectName(t.project, language), color: COLORS.gray },
+      { label: ui(language, "model"), value: t.model || "-", color: COLORS.gray },
+      { label: ui(language, "tokens"), value: t.tokensUsed ? t.tokensUsed.toLocaleString(language === "zh" ? "zh-CN" : "en-US") : "-", color: COLORS.gray },
+      { label: ui(language, "archived"), value: ui(language, t.archived ? "yes" : "no"), color: t.archived ? COLORS.yellow : COLORS.gray },
+      { label: ui(language, "pinned"), value: ui(language, t.pinned ? "yes" : "no"), color: t.pinned ? COLORS.yellow : COLORS.gray },
+      { label: ui(language, "id"), value: t.id, color: COLORS.dark },
+      { label: ui(language, "path"), value: t.cwd || ui(language, "unknown"), color: COLORS.gray },
+    ]),
+    { text: ui(language, "threadOpen"), color: COLORS.dark },
   ];
 }
 
-function statsLines(threads, nodes, includeArchived, search) {
+function statsLines(threads, nodes, includeArchived, search, language) {
   const projects = new Set(threads.map((t) => t.cwd || "(unknown)"));
   const active = threads.filter((t) => !t.archived).length;
   const archived = threads.length - active;
-  return [
-    { text: `CodexHome: ${codexHome()}`, color: COLORS.dark },
-    { text: `Projects: ${projects.size}`, color: COLORS.gray },
-    { text: `Threads: ${threads.length} total | ${active} active | ${archived} archived`, color: COLORS.gray },
-    { text: `Visible nodes: ${nodes.length}`, color: COLORS.gray },
-    { text: `Archive filter: ${includeArchived ? "shown" : "hidden"}`, color: COLORS.gray },
-    { text: `Search: ${search || "(none)"}`, color: COLORS.gray },
+  const rows = [
+    { label: ui(language, "codexHome"), value: codexHome(), color: COLORS.dark },
+    { label: ui(language, "projects"), value: projects.size, color: COLORS.gray },
+    { label: ui(language, "threads"), value: ui(language, "threadSummary", { total: threads.length, active, archived }), color: COLORS.gray },
+    { label: ui(language, "visibleNodes"), value: nodes.length, color: COLORS.gray },
+    { label: ui(language, "archiveFilter"), value: ui(language, includeArchived ? "shown" : "hidden"), color: COLORS.gray },
+    { label: ui(language, "search"), value: search || ui(language, "none"), color: COLORS.gray },
   ];
+  return labelValueRows(language, rows);
 }
 
-function keyLines(promptMode) {
+function keyLines(promptMode, language, availableLines = 0) {
   if (promptMode === "permission") {
     return [
-      { text: "Choose permission mode:", color: COLORS.white },
-      { text: "1 Safe: read-only + on-request", color: COLORS.gray },
-      { text: "2 Normal: workspace-write + on-request", color: COLORS.green },
-      { text: "3 Auto: workspace-write + never", color: COLORS.yellow },
-      { text: "4 Full: danger-full-access + never", color: COLORS.red },
-      { text: "Esc: cancel", color: COLORS.gray },
+      { text: ui(language, "permissionChoose"), color: COLORS.white },
+      { text: `1 ${ui(language, "modeSafe")}：${ui(language, "modeSafeLabel")}`, color: COLORS.gray },
+      { text: `2 ${ui(language, "modeNormal")}：${ui(language, "modeNormalLabel")}`, color: COLORS.green },
+      { text: `3 ${ui(language, "modeAuto")}：${ui(language, "modeAutoLabel")}`, color: COLORS.yellow },
+      { text: `4 ${ui(language, "modeFull")}：${ui(language, "modeFullLabel")}`, color: COLORS.red },
+      { text: ui(language, "escCancel"), color: COLORS.gray },
     ];
   }
   if (promptMode) {
     return [
-      { text: "Enter: apply input", color: COLORS.white },
-      { text: "Esc: cancel input", color: COLORS.gray },
-      { text: "Backspace: delete", color: COLORS.gray },
+      { text: ui(language, "inputApply"), color: COLORS.white },
+      { text: ui(language, "inputCancel"), color: COLORS.gray },
+      { text: ui(language, "backspaceDelete"), color: COLORS.gray },
     ];
   }
-  return [
-    { text: "Up/Down: move selection", color: COLORS.gray },
-    { text: "Enter/Right: expand or open", color: COLORS.gray },
-    { text: "Left: collapse or jump to parent", color: COLORS.gray },
-    { text: "O: open selected thread with permissions", color: COLORS.gray },
-    { text: "N: new thread with permissions", color: COLORS.gray },
-    { text: "D: archive selected thread", color: COLORS.yellow },
-    { text: "T: rename selected thread", color: COLORS.gray },
-    { text: "F: open folder", color: COLORS.gray },
-    { text: "S: search | A: archive toggle", color: COLORS.gray },
-    { text: "R: refresh | Q: quit", color: COLORS.gray },
+  const compact = [
+    { text: ui(language, "keyLanguageQuit"), color: COLORS.white },
+    { text: ui(language, "keyNavigation"), color: COLORS.gray },
+    { text: ui(language, "keyThreadActions"), color: COLORS.gray },
+    { text: ui(language, "keyOtherActions"), color: COLORS.gray },
   ];
+  const detailed = [
+    { text: ui(language, "switchLanguage"), color: COLORS.white },
+    { text: ui(language, "quit"), color: COLORS.gray },
+    { text: ui(language, "moveSelection"), color: COLORS.gray },
+    { text: ui(language, "expandOpen"), color: COLORS.gray },
+    { text: ui(language, "collapseParent"), color: COLORS.gray },
+    { text: ui(language, "openThread"), color: COLORS.gray },
+    { text: ui(language, "newThread"), color: COLORS.gray },
+    { text: ui(language, "archiveThread"), color: COLORS.yellow },
+    { text: ui(language, "renameThread"), color: COLORS.gray },
+    { text: ui(language, "openFolder"), color: COLORS.gray },
+    { text: ui(language, "searchShortcut"), color: COLORS.gray },
+    { text: ui(language, "archiveToggle"), color: COLORS.gray },
+    { text: ui(language, "refresh"), color: COLORS.gray },
+  ];
+  return availableLines >= detailed.length ? detailed : compact;
 }
 
-function quotaLines(quota) {
+function quotaLines(quota, language) {
   if (!quota?.rate) {
     return [
-      { text: "Quota: not found yet.", color: COLORS.yellow },
-      { text: "Start or resume Codex to refresh.", color: COLORS.gray },
-      { text: `Now: ${formatDate(new Date(), true)}`, color: COLORS.cyan },
+      { text: ui(language, "quotaUnavailable"), color: COLORS.yellow },
+      { text: ui(language, "quotaHint"), color: COLORS.gray },
+      { text: `${ui(language, "now")}：${formatDate(new Date(), true)}`, color: COLORS.cyan },
     ];
   }
   const rate = quota.rate;
-  const primary = rate.primary || {};
-  const secondary = rate.secondary || {};
+  const windows = [rate.primary, rate.secondary].filter((window) => Number(window?.window_minutes) > 0);
   return [
-    { text: `Plan: ${rate.plan_type || "-"} | Last quota event: ${formatDate(quota.timestamp, true)}`, color: COLORS.cyan },
-    { text: `${quotaName(primary.window_minutes)} remaining: ${remainingPercent(primary.used_percent)}% | used: ${safePercent(primary.used_percent)}% | ${resetInfo(primary.resets_at)}`, color: COLORS.cyan },
-    { text: `${quotaName(secondary.window_minutes)} remaining: ${remainingPercent(secondary.used_percent)}% | used: ${safePercent(secondary.used_percent)}% | ${resetInfo(secondary.resets_at)}`, color: COLORS.cyan },
-    { text: `Now: ${formatDate(new Date(), true)}`, color: COLORS.cyan },
+    { text: ui(language, "planLastQuota", { plan: displayPlan(rate.plan_type, language), time: formatDate(quota.timestamp, true) }), color: COLORS.cyan },
+    ...windows.map((window) => {
+      const health = quotaHealth(window);
+      return {
+        text: ui(language, "quotaRemaining", {
+          window: quotaName(window.window_minutes, language),
+          remaining: remainingPercent(window.used_percent),
+          used: safePercent(window.used_percent),
+          health: quotaHealthText(language, health),
+          reset: resetInfo(window.resets_at, language),
+        }),
+        color: quotaHealthColor(health),
+      };
+    }),
+    { text: `${ui(language, "now")}：${formatDate(new Date(), true)}`, color: COLORS.cyan },
   ];
 }
 
@@ -712,10 +1342,16 @@ function layout() {
   return { width, height, leftWidth, rightWidth, bodyHeight, detailsHeight, statsHeight, keysHeight, quotaHeight };
 }
 
-function treeContent(nodes, selectedIndex, scrollTop, treeHeight, width) {
+function treeContent(nodes, selectedIndex, scrollTop, treeHeight, width, language) {
   const rows = [];
   const visible = Math.max(1, treeHeight - 3);
   const threadIndent = "     ";
+  const projectCountWidth = Math.max(3, ...nodes
+    .filter((node) => node.type === "project" || node.type === "pinned")
+    .map((node) => displayWidth(`(${node.project.threads.length})`)));
+  const projectDateWidth = 16;
+  const projectPrefixWidth = displayWidth(" [+] ");
+  const projectNameWidth = Math.max(8, width - 2 - projectPrefixWidth - projectCountWidth - projectDateWidth - 2);
   for (let row = 0; row < visible; row++) {
     const index = scrollTop + row;
     if (index >= nodes.length) {
@@ -724,18 +1360,25 @@ function treeContent(nodes, selectedIndex, scrollTop, treeHeight, width) {
     }
     const node = nodes[index];
     const isSelected = index === selectedIndex;
-    if (node.type === "project") {
+    if (node.type === "project" || node.type === "pinned") {
       const mark = node.expanded ? "[-]" : "[+]";
       rows.push({
-        text: ` ${mark} ${node.project.name} (${node.project.threads.length}) ${formatDate(node.project.latest)}`,
+        text: formatColumns([
+          { text: ` ${mark} ` },
+          { text: displayProjectName(node.project.name, language), width: projectNameWidth },
+          { text: " " },
+          { text: `(${node.project.threads.length})`, width: projectCountWidth, align: "right" },
+          { text: " " },
+          { text: node.type === "pinned" ? "" : formatDate(node.project.latest), width: projectDateWidth },
+        ]),
         color: COLORS.white,
         selected: isSelected,
       });
     } else {
       const t = node.thread;
-      const archive = t.archived ? "A" : " ";
+      const markers = t.archived ? ui(language, "archiveMarker") : "";
       const time = t.updatedText ? t.updatedText.slice(5) : "";
-      const prefix = `${threadIndent}${archive} ${time}  `;
+      const prefix = `${threadIndent}${pad(markers, 4)}${time}  `;
       rows.push({
         text: `${prefix}${truncate(t.title, Math.max(8, width - displayWidth(prefix) - 2))}`,
         color: t.archived ? COLORS.yellow : COLORS.gray,
@@ -743,55 +1386,57 @@ function treeContent(nodes, selectedIndex, scrollTop, treeHeight, width) {
       });
     }
   }
-  if (scrollTop > 0 && rows.length) rows[0] = { text: "^ more above", color: COLORS.yellow };
-  if (scrollTop + visible < nodes.length && rows.length) rows[rows.length - 1] = { text: "v more below", color: COLORS.yellow };
+  if (scrollTop > 0 && rows.length) rows[0] = { text: ui(language, "moreAbove"), color: COLORS.yellow };
+  if (scrollTop + visible < nodes.length && rows.length) rows[rows.length - 1] = { text: ui(language, "moreBelow"), color: COLORS.yellow };
   return rows;
 }
 
 function makeFrame(state) {
   const l = layout();
+  const language = state.language || "zh";
   if (l.width < 92 || l.height < 26) {
     return [
-      style(pad("Codex Thread Panel", l.width), COLORS.white),
-      style(pad("Terminal too small. Recommended minimum: 92 columns x 26 rows.", l.width), COLORS.yellow),
-      style(pad(`Current: ${l.width} x ${l.height}. Resize terminal or press Q to exit.`, l.width), COLORS.gray),
+      style(pad(ui(language, "title"), l.width), COLORS.white),
+      style(pad(ui(language, "terminalTooSmall"), l.width), COLORS.yellow),
+      style(pad(ui(language, "terminalCurrent", { width: l.width, height: l.height }), l.width), COLORS.gray),
       ...Array.from({ length: Math.max(0, l.height - 3) }, () => " ".repeat(l.width)),
     ].slice(0, l.height);
   }
 
   const nodes = state.nodes;
   const selected = selectedNode(nodes, state.selectedIndex);
-  const left = panel(l.leftWidth, l.bodyHeight, "Projects / Threads", [
-    { text: `Archived: ${state.includeArchived ? "shown" : "hidden"} | Search: ${state.search || "(none)"}`, color: COLORS.dark },
-    ...treeContent(nodes, state.selectedIndex, state.scrollTop, l.bodyHeight - 1, l.leftWidth),
+  const left = panel(l.leftWidth, l.bodyHeight, ui(language, "projectsThreads"), [
+    { text: `${ui(language, "archived")}：${ui(language, state.includeArchived ? "shown" : "hidden")} | ${ui(language, "search")}：${state.search || ui(language, "none")}`, color: COLORS.dark },
+    ...treeContent(nodes, state.selectedIndex, state.scrollTop, l.bodyHeight - 1, l.leftWidth, language),
   ]);
   const rightParts = [
-    ...panel(l.rightWidth, l.detailsHeight, "Selection", detailLines(selected)),
-    ...panel(l.rightWidth, l.statsHeight, "Workspace", statsLines(state.threads, nodes, state.includeArchived, state.search)),
-    ...panel(l.rightWidth, l.keysHeight, "Keys", keyLines(state.promptMode)),
-    ...panel(l.rightWidth, l.quotaHeight, "Quota", quotaLines(state.quota)),
+    ...panel(l.rightWidth, l.detailsHeight, ui(language, "selection"), detailLines(selected, language)),
+    ...panel(l.rightWidth, l.statsHeight, ui(language, "workspace"), statsLines(state.threads, nodes, state.includeArchived, state.search, language)),
+    ...panel(l.rightWidth, l.keysHeight, ui(language, "keys"), keyLines(state.promptMode, language, l.keysHeight - 2)),
+    ...panel(l.rightWidth, l.quotaHeight, ui(language, "quota"), quotaLines(state.quota, language)),
   ];
 
   const lines = [];
-  lines.push(style(pad("Codex Thread Panel", l.width), COLORS.white));
+  lines.push(style(pad(ui(language, "title"), l.width), COLORS.white));
   for (let i = 0; i < l.bodyHeight; i++) {
     lines.push((left[i] || " ".repeat(l.leftWidth)) + (rightParts[i] || " ".repeat(l.rightWidth)));
   }
-  let status = state.status || "Ready";
-  if (state.promptMode === "search") status = `Search: ${state.promptBuffer}`;
-  if (state.promptMode === "path") status = `Project path: ${state.promptBuffer}`;
-  if (state.promptMode === "rename") status = `Rename > ${state.promptBuffer}`;
-  if (state.promptMode === "permission") status = "Select permission: 1 Safe, 2 Normal, 3 Auto, 4 Full, Esc cancel";
+  let status = state.status || ui(language, "ready");
+  if (state.promptMode === "search") status = `${ui(language, "searchPrompt")} ${state.promptBuffer}`;
+  if (state.promptMode === "path") status = `${ui(language, "pathPrompt")} ${state.promptBuffer}`;
+  if (state.promptMode === "rename") status = `${ui(language, "renamePrompt")} ${state.promptBuffer}`;
+  if (state.promptMode === "permission") status = ui(language, "permissionPrompt");
   lines.push(style(pad(status, l.width), COLORS.dark));
   return lines.slice(0, l.height);
 }
 
 function cursorColumnForPrompt(state) {
   if (!state.promptMode) return null;
+  const language = state.language || "zh";
   let prefix = "";
-  if (state.promptMode === "search") prefix = "Search: ";
-  else if (state.promptMode === "path") prefix = "Project path: ";
-  else if (state.promptMode === "rename") prefix = "Rename > ";
+  if (state.promptMode === "search") prefix = `${ui(language, "searchPrompt")} `;
+  else if (state.promptMode === "path") prefix = `${ui(language, "pathPrompt")} `;
+  else if (state.promptMode === "rename") prefix = `${ui(language, "renamePrompt")} `;
   else return null;
   const beforeCursor = Array.from(state.promptBuffer || "").slice(0, state.promptCursor || 0).join("");
   return Math.min((process.stdout.columns || 120), displayWidth(prefix) + displayWidth(beforeCursor) + 1);
@@ -836,8 +1481,23 @@ function ensureSelectionVisible(state) {
   }
 }
 
-function rebuildNodes(state) {
+function nodeIdentity(node) {
+  if (node?.type === "thread") return `thread:${node.thread.id}`;
+  if (node?.type === "project" || node?.type === "pinned") return `project:${node.project.cwd}`;
+  return "";
+}
+
+function isGroupNode(node) {
+  return node?.type === "project" || node?.type === "pinned";
+}
+
+function rebuildNodes(state, preserveSelection = false) {
+  const selected = preserveSelection ? nodeIdentity(state.nodes[state.selectedIndex]) : "";
   state.nodes = buildNodes(state.threads, state.expanded, state.includeArchived, state.search);
+  if (selected) {
+    const index = state.nodes.findIndex((node) => nodeIdentity(node) === selected);
+    if (index >= 0) state.selectedIndex = index;
+  }
   ensureSelectionVisible(state);
 }
 
@@ -850,28 +1510,32 @@ function selectedProjectCwd(node) {
 
 function selectedProjectName(node) {
   if (!node) return "";
-  if (node.type === "project") return node.project.name;
+  if (node.type === "project" || node.type === "pinned") return node.project.name;
   if (node.type === "thread") return node.thread.project;
   return "";
 }
 
 const PERMISSION_MODES = {
   "1": {
+    id: "Safe",
     name: "Safe",
     label: "read-only + on-request",
     args: ["--sandbox", "read-only", "--ask-for-approval", "on-request"],
   },
   "2": {
+    id: "Normal",
     name: "Normal",
     label: "workspace-write + on-request",
     args: ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
   },
   "3": {
+    id: "Auto",
     name: "Auto",
     label: "workspace-write + never",
     args: ["--sandbox", "workspace-write", "--ask-for-approval", "never"],
   },
   "4": {
+    id: "Full",
     name: "Full",
     label: "danger-full-access + never",
     args: ["--sandbox", "danger-full-access", "--ask-for-approval", "never"],
@@ -998,7 +1662,7 @@ function codexThreadModelArgString(thread) {
   return args.map(psQuote).join(" ");
 }
 
-function openThread(thread, permissionMode = PERMISSION_MODES["2"]) {
+function openThread(thread, permissionMode = PERMISSION_MODES["2"], language = "zh") {
   if (!thread?.id) return false;
   const commands = [];
   if (thread.cwd && fs.existsSync(thread.cwd)) {
@@ -1006,15 +1670,15 @@ function openThread(thread, permissionMode = PERMISSION_MODES["2"]) {
   }
   const modelArgs = codexThreadModelArgString(thread);
   commands.push(`codex resume ${codexPermissionArgs(permissionMode)}${modelArgs ? ` ${modelArgs}` : ""} ${psQuote(thread.id)}`);
-  return startPowerShell(commands, `Codex - ${thread.project || "Thread"} - ${permissionMode.name}`);
+  return startPowerShell(commands, `Codex - ${displayProjectName(thread.project || "(unknown)", language)} - ${permissionModeName(permissionMode, language)}`);
 }
 
-function newThread(cwd, permissionMode = PERMISSION_MODES["2"]) {
+function newThread(cwd, permissionMode = PERMISSION_MODES["2"], language = "zh") {
   if (!cwd || !fs.existsSync(cwd)) return false;
   return startPowerShell([
     `Set-Location -LiteralPath ${psQuote(cwd)}`,
     `codex -C ${psQuote(cwd)} ${codexPermissionArgs(permissionMode)} ${psQuote("新建对话线程")}`,
-  ], `Codex - ${projectName(cwd)} - ${permissionMode.name}`);
+  ], `Codex - ${displayProjectName(projectName(cwd), language)} - ${permissionModeName(permissionMode, language)}`);
 }
 
 function openFolder(cwd) {
@@ -1023,31 +1687,22 @@ function openFolder(cwd) {
   return true;
 }
 
-function startRenameThread(thread) {
-  if (!thread?.id) return false;
-  const script = path.join(__dirname, "Rename-CodexThread.ps1");
-  if (!fs.existsSync(script)) return false;
-  const commands = [
-    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File ${psQuote(script)} -ThreadId ${psQuote(thread.id)} -CurrentTitle ${psQuote(thread.title)}`,
-  ];
-  return startPowerShell(commands, `Rename - ${thread.project || "Thread"}`);
-}
-
 function handlePromptInput(state, key) {
+  const language = state.language || "zh";
   if (isIgnoredTerminalInput(key)) return;
   if (key === "\x1b") {
     state.promptMode = "";
     state.promptBuffer = "";
     state.promptCursor = 0;
     state.pendingAction = null;
-    state.status = "Input cancelled.";
+    state.status = ui(language, "inputCancelled");
     return;
   }
 
   if (state.promptMode === "permission") {
     const mode = PERMISSION_MODES[key];
     if (!mode) {
-      state.status = "Choose 1 Safe, 2 Normal, 3 Auto, 4 Full. Esc cancels.";
+      state.status = ui(language, "choosePermission");
       return;
     }
 
@@ -1058,27 +1713,27 @@ function handlePromptInput(state, key) {
     state.pendingAction = null;
 
     if (!action) {
-      state.status = "No pending action.";
+      state.status = ui(language, "noPendingAction");
       return;
     }
     if (["open", "new"].includes(action.type)) {
       const now = Date.now();
       if (now - Number(state.lastWindowLaunchAt || 0) < 1200) {
-        state.status = "Ignored duplicate launch input.";
+        state.status = ui(language, "duplicateLaunch");
         return;
       }
       state.lastWindowLaunchAt = now;
     }
 
     if (action.type === "open" && action.thread) {
-      if (openThread(action.thread, mode)) state.status = `Opened thread with ${mode.name}: ${action.thread.title}`;
-      else state.status = "Failed to open thread.";
+      if (openThread(action.thread, mode, language)) state.status = ui(language, "openedThread", { mode: permissionModeName(mode, language), title: action.thread.title });
+      else state.status = ui(language, "openThreadFailed");
       return;
     }
 
     if (action.type === "new" && action.cwd) {
-      if (newThread(action.cwd, mode)) state.status = `Started new Codex thread with ${mode.name}: ${action.cwd}`;
-      else state.status = `Failed to start new thread: ${action.cwd}`;
+      if (newThread(action.cwd, mode, language)) state.status = ui(language, "startedThread", { mode: permissionModeName(mode, language), path: action.cwd });
+      else state.status = ui(language, "startThreadFailed", { path: action.cwd });
       return;
     }
 
@@ -1087,7 +1742,7 @@ function handlePromptInput(state, key) {
       state.promptBuffer = "";
       state.promptCursor = 0;
       state.pendingPermission = mode;
-      state.status = `Enter project path for ${mode.name} mode.`;
+      state.status = ui(language, "enterProjectPath", { mode: permissionModeName(mode, language) });
       return;
     }
   }
@@ -1125,20 +1780,21 @@ function handlePromptInput(state, key) {
       state.search = value;
       state.selectedIndex = 0;
       state.scrollTop = 0;
-      state.status = value ? `Search applied: ${value}` : "Search cleared.";
+      state.status = value ? ui(language, "searchApplied", { value }) : ui(language, "searchCleared");
       rebuildNodes(state);
     } else if (state.promptMode === "path") {
-      if (newThread(value, state.pendingPermission || PERMISSION_MODES["2"])) state.status = `Started new Codex thread in: ${value}`;
-      else state.status = `Invalid project path: ${value}`;
+      if (newThread(value, state.pendingPermission || PERMISSION_MODES["2"], language)) state.status = ui(language, "startedThreadIn", { path: value });
+      else state.status = ui(language, "invalidProjectPath", { path: value });
       state.pendingPermission = null;
     } else if (state.promptMode === "rename") {
       const thread = state.pendingAction?.thread;
       if (thread && renameThread(thread, value)) {
         state.threads = readThreads();
-        state.status = `Renamed thread: ${value}`;
+        state.threadDataSignature = threadDataSignature();
+        state.status = ui(language, "renamedThread", { title: value });
         rebuildNodes(state);
       } else {
-        state.status = "Rename failed.";
+        state.status = ui(language, "renameFailed");
       }
       state.pendingAction = null;
     }
@@ -1168,8 +1824,9 @@ function handlePromptInput(state, key) {
 }
 
 function handleKey(state, key, renderer) {
+  const language = state.language || "zh";
   if (isIgnoredTerminalInput(key)) {
-    state.status = "Ignored mouse/terminal control input.";
+    state.status = ui(language, "ignoredTerminalInput");
     return true;
   }
 
@@ -1191,39 +1848,39 @@ function handleKey(state, key, renderer) {
     return true;
   }
   if (key === "\x1b[C") {
-    if (node?.type === "project") {
+    if (isGroupNode(node)) {
       state.expanded.add(node.project.cwd);
-      state.status = `Expanded project: ${node.project.name}`;
+      state.status = ui(language, "expandedProject", { name: displayProjectName(node.project.name, language) });
       rebuildNodes(state);
     }
     return true;
   }
   if (key === "\x1b[D") {
-    if (node?.type === "project") {
+    if (isGroupNode(node)) {
       state.expanded.delete(node.project.cwd);
-      state.status = `Collapsed project: ${node.project.name}`;
+      state.status = ui(language, "collapsedProject", { name: displayProjectName(node.project.name, language) });
       rebuildNodes(state);
     } else if (node?.type === "thread") {
-      const parentIndex = state.nodes.findIndex((item) => item.type === "project" && item.project.cwd === node.project.cwd);
+      const parentIndex = state.nodes.findIndex((item) => isGroupNode(item) && item.project.cwd === node.project.cwd);
       if (parentIndex >= 0) state.selectedIndex = parentIndex;
       ensureSelectionVisible(state);
     }
     return true;
   }
   if (key === "\r" || key === "\n") {
-    if (node?.type === "project") {
+    if (isGroupNode(node)) {
       if (state.expanded.has(node.project.cwd)) {
         state.expanded.delete(node.project.cwd);
-        state.status = `Collapsed project: ${node.project.name}`;
+        state.status = ui(language, "collapsedProject", { name: displayProjectName(node.project.name, language) });
       } else {
         state.expanded.add(node.project.cwd);
-        state.status = `Expanded project: ${node.project.name}`;
+        state.status = ui(language, "expandedProject", { name: displayProjectName(node.project.name, language) });
       }
       rebuildNodes(state);
     } else if (node?.type === "thread") {
       state.promptMode = "permission";
       state.pendingAction = { type: "open", thread: node.thread };
-      state.status = `Choose permission mode for: ${node.thread.title}`;
+      state.status = ui(language, "chooseThreadPermission", { title: node.thread.title });
     }
     return true;
   }
@@ -1232,9 +1889,9 @@ function handleKey(state, key, renderer) {
     if (node?.type === "thread") {
       state.promptMode = "permission";
       state.pendingAction = { type: "open", thread: node.thread };
-      state.status = `Choose permission mode for: ${node.thread.title}`;
+      state.status = ui(language, "chooseThreadPermission", { title: node.thread.title });
     } else {
-      state.status = "Select a thread first.";
+      state.status = ui(language, "selectThreadFirst");
     }
     return true;
   }
@@ -1243,45 +1900,46 @@ function handleKey(state, key, renderer) {
     if (cwd) {
       state.promptMode = "permission";
       state.pendingAction = { type: "new", cwd };
-      state.status = `Choose permission mode for new thread: ${cwd}`;
+      state.status = ui(language, "chooseNewPermission", { path: cwd });
     }
     else {
       state.promptMode = "permission";
       state.pendingAction = { type: "newPath" };
-      state.status = "Choose permission mode, then enter project path.";
+      state.status = ui(language, "choosePathPermission");
     }
     return true;
   }
   if (lower === "f") {
     const cwd = selectedProjectCwd(node);
-    if (openFolder(cwd)) state.status = `Opened folder: ${cwd}`;
-    else state.status = "No valid project folder for this selection.";
+    if (openFolder(cwd)) state.status = ui(language, "openedFolder", { path: cwd });
+    else state.status = ui(language, "invalidProjectFolder");
     return true;
   }
   if (lower === "d") {
     if (node?.type !== "thread") {
-      state.status = "Select a thread to archive.";
+      state.status = ui(language, "selectThreadArchive");
       return true;
     }
     if (archiveThread(node.thread)) {
       state.threads = readThreads();
-      state.status = `Archived thread: ${node.thread.title}`;
+      state.threadDataSignature = threadDataSignature();
+      state.status = ui(language, "archivedThread", { title: node.thread.title });
       rebuildNodes(state);
     } else {
-      state.status = "Archive failed.";
+      state.status = ui(language, "archiveFailed");
     }
     return true;
   }
   if (lower === "t") {
     if (node?.type !== "thread") {
-      state.status = "Select a thread to rename.";
+      state.status = ui(language, "selectThreadRename");
       return true;
     }
-    if (startRenameThread(node.thread)) {
-      state.status = "Rename window opened. Press R after saving to refresh.";
-    } else {
-      state.status = "Failed to open rename window.";
-    }
+    state.promptMode = "rename";
+    state.promptBuffer = node.thread.title;
+    state.promptCursor = Array.from(state.promptBuffer).length;
+    state.pendingAction = { type: "rename", thread: node.thread };
+    state.status = ui(language, "enterNewTitle", { title: node.thread.title });
     return true;
   }
   if (lower === "s") {
@@ -1294,43 +1952,52 @@ function handleKey(state, key, renderer) {
     state.includeArchived = !state.includeArchived;
     state.selectedIndex = 0;
     state.scrollTop = 0;
-    state.status = state.includeArchived ? "Archived threads are shown." : "Archived threads are hidden.";
+    state.status = ui(language, state.includeArchived ? "archivedShown" : "archivedHidden");
     rebuildNodes(state);
     return true;
   }
   if (lower === "r") {
     state.threads = readThreads();
+    state.threadDataSignature = threadDataSignature();
     state.quota = readLatestQuota();
     state.selectedIndex = 0;
     state.scrollTop = 0;
-    state.status = "Refreshed data.";
+    state.status = ui(language, "refreshedData");
     rebuildNodes(state);
     renderer.reset();
     return true;
   }
-  if (lower === "e" && node?.type === "project") {
+  if (lower === "e" && isGroupNode(node)) {
     for (const project of groupProjects(state.threads, state.includeArchived, state.search)) {
       state.expanded.add(project.cwd);
     }
-    state.status = "Expanded all visible projects.";
+    if (state.nodes.some((item) => item.type === "pinned")) state.expanded.add(PINNED_SECTION_CWD);
+    state.status = ui(language, "expandedAll");
     rebuildNodes(state);
     return true;
   }
-  if (lower === "c" && node?.type === "project") {
+  if (lower === "c" && isGroupNode(node)) {
     state.expanded.clear();
-    state.status = "Collapsed all projects.";
+    state.status = ui(language, "collapsedAll");
     rebuildNodes(state);
     return true;
   }
-  state.status = `Unhandled key. Selection: ${selectedProjectName(node) || "-"}`;
+  if (lower === "l") {
+    state.language = language === "zh" ? "en" : "zh";
+    state.status = ui(state.language, "languageChanged", { language: ui(state.language, state.language === "zh" ? "languageChinese" : "languageEnglish") });
+    return true;
+  }
+  state.status = ui(language, "unhandledKey", { name: displayProjectName(selectedProjectName(node) || "(unknown)", language) });
   return true;
 }
 
 function main() {
   const state = {
     threads: readThreads(),
+    threadDataSignature: threadDataSignature(),
     quota: readLatestQuota(),
-    expanded: new Set(),
+    language: "zh",
+    expanded: new Set([PINNED_SECTION_CWD]),
     includeArchived: false,
     search: "",
     promptMode: "",
@@ -1342,16 +2009,20 @@ function main() {
     selectedIndex: 0,
     scrollTop: 0,
     nodes: [],
-    status: "Enter expands a project. Enter on a thread opens it in a new PowerShell.",
+    status: ui("zh", "initialStatus"),
   };
   rebuildNodes(state);
 
   if (process.argv.includes("--check")) {
     const projects = new Set(state.threads.map((t) => t.cwd || "(unknown)"));
+    const quotaWindows = [state.quota?.rate?.primary, state.quota?.rate?.secondary]
+      .filter((window) => Number(window?.window_minutes) > 0)
+      .map((window) => `${window.window_minutes}m ${safePercent(window.used_percent)}% used`)
+      .join(" | ");
     console.log(`CodexHome: ${codexHome()}`);
     console.log(`Threads: ${state.threads.length}`);
     console.log(`Projects: ${projects.size}`);
-    console.log(`Quota: ${state.quota?.rate ? `${state.quota.rate.plan_type || "-"} ${safePercent(state.quota.rate.primary?.used_percent)}%/${safePercent(state.quota.rate.secondary?.used_percent)}%` : "not found"}`);
+    console.log(`Quota: ${state.quota?.rate ? `${displayPlan(state.quota.rate.plan_type, "en")} | ${quotaWindows || "no usage windows"}` : "not found"}`);
     console.log(`RolloutTitlesVisible: ${state.threads.filter((t) => isRolloutName(t.title)).length}`);
     const overrideProbe = state.threads.find((t) => t.id === "019dc5a6-6acc-7f30-8d1b-690ab326fb40");
     if (overrideProbe) console.log(`OverrideProbeTitle: ${overrideProbe.title}`);
@@ -1360,8 +2031,10 @@ function main() {
 
   const renderer = new Renderer();
   let running = true;
+  let resizeTimer = null;
 
   function cleanup() {
+    if (resizeTimer) clearTimeout(resizeTimer);
     try {
       process.stdin.setRawMode(false);
     } catch {
@@ -1381,7 +2054,8 @@ function main() {
   process.stdin.resume();
   process.stdin.setEncoding("utf8");
 
-  let lastQuotaRead = 0;
+  let lastQuotaRead = Date.now();
+  let lastThreadSignatureCheck = 0;
   let lastColumns = process.stdout.columns;
   let lastRows = process.stdout.rows;
 
@@ -1394,6 +2068,24 @@ function main() {
       process.stdout.write(HIDE_CURSOR);
     }
   }
+
+  function syncTerminalSize() {
+    if (process.stdout.columns === lastColumns && process.stdout.rows === lastRows) return false;
+    lastColumns = process.stdout.columns;
+    lastRows = process.stdout.rows;
+    ensureSelectionVisible(state);
+    return true;
+  }
+
+  function scheduleResizeRender() {
+    if (resizeTimer) clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(() => {
+      resizeTimer = null;
+      if (running && syncTerminalSize()) render();
+    }, 75);
+  }
+
+  if (process.stdout.isTTY) process.stdout.on("resize", scheduleResizeRender);
 
   process.stdin.on("data", (chunk) => {
     for (const key of splitKeys(chunk)) {
@@ -1408,17 +2100,22 @@ function main() {
 
   setInterval(() => {
     if (!running) return;
-    if (process.stdout.columns !== lastColumns || process.stdout.rows !== lastRows) {
-      lastColumns = process.stdout.columns;
-      lastRows = process.stdout.rows;
-      renderer.reset();
+    syncTerminalSize();
+    if (Date.now() - lastThreadSignatureCheck >= 5000) {
+      const signature = threadDataSignature();
+      lastThreadSignatureCheck = Date.now();
+      if (signature !== state.threadDataSignature) {
+        state.threads = readThreads();
+        state.threadDataSignature = signature;
+        rebuildNodes(state, true);
+      }
     }
     if (Date.now() - lastQuotaRead > 10000) {
       state.quota = readLatestQuota();
       lastQuotaRead = Date.now();
     }
     render();
-  }, 250);
+  }, 1000);
 
   render();
 }

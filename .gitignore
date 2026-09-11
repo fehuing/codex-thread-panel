@@ -1,5 +1,6 @@
 *.log
 *.tmp
 *.bak-*
+node_modules/
 douyin_tbox_*
 1.png

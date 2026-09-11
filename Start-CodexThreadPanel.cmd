@@ -1,3 +1,3 @@
 @echo off
 setlocal
-node "%~dp0CodexThreadPanelTui.js"
+node --no-warnings "%~dp0CodexThreadPanelTui.js"
