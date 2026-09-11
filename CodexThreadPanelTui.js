@@ -5,6 +5,7 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const cp = require("child_process");
+const { Worker, isMainThread, parentPort, workerData } = require("worker_threads");
 
 let DatabaseSync = null;
 try {
@@ -123,6 +124,11 @@ const UI_TEXT = Object.freeze({
     quotaGood: "额度良好",
     quotaModerate: "额度中等",
     quotaCritical: "额度严重",
+    tokenUsageSummary: "Token 消耗：日 {day} | 周 {week} | 月 {month}",
+    tokenUsageTotal: "账号累计 Token 数：{total} | API 账单模拟：{apiCost} [T_T]",
+    tokenUsageTotalPending: "账号累计 Token 数：{total}",
+    quotaUsagePending: "统计中",
+    quotaUsageUnavailable: "--",
     fiveHourLimit: "5 小时额度",
     weeklyLimit: "每周额度",
     minuteLimit: "{minutes} 分钟额度",
@@ -265,6 +271,11 @@ const UI_TEXT = Object.freeze({
     quotaGood: "quota healthy",
     quotaModerate: "quota moderate",
     quotaCritical: "quota critical",
+    tokenUsageSummary: "Tokens: day {day} | week {week} | month {month}",
+    tokenUsageTotal: "Account lifetime tokens: {total} | pretend API bill: {apiCost} [T_T]",
+    tokenUsageTotalPending: "Account lifetime tokens: {total}",
+    quotaUsagePending: "calculating",
+    quotaUsageUnavailable: "--",
     fiveHourLimit: "5h limit",
     weeklyLimit: "weekly limit",
     minuteLimit: "{minutes}m limit",
@@ -326,6 +337,68 @@ const UI_TEXT = Object.freeze({
 function ui(language, key, values = {}) {
   const template = UI_TEXT[language]?.[key] || UI_TEXT.en[key] || key;
   return template.replace(/\{(\w+)\}/g, (_match, name) => String(values[name] ?? ""));
+}
+
+// Campy idle frames, reused under the Campy MIT License. See THIRD_PARTY_NOTICES.md.
+const CAMPY_PETS = Object.freeze({
+  cat: {
+    names: { zh: "猫", en: "cat" },
+    color: COLORS.yellow,
+    frames: [
+      ["  /\\_____/\\  ", " /  o   o  \\ ", "(  == ^ ==  )", " \\  '-'  /  ", " (__)  (__) "],
+      ["  /\\_____/\\  ", " /  -   -  \\ ", "(  == ^ ==  )", " \\  '-'  /  ", " (__)  (__) "],
+    ],
+  },
+  hamster: {
+    names: { zh: "仓鼠", en: "hamster" },
+    color: COLORS.orange,
+    frames: [
+      [" (\\\\/)  (\\\\/) ", "  ( ..)  ( ..) ", "   `--'`--'    ", "    (   )    ", "     ( )     "],
+      [" (\\\\/)  (\\\\/) ", "  ( -.)  ( -.) ", "   `--'`--'    ", "    (   )    ", "     ( )     "],
+    ],
+  },
+  ghost: {
+    names: { zh: "幽灵", en: "ghost" },
+    color: COLORS.cyan,
+    frames: [
+      ["   .-.     ", "  (o o)    ", "  | O |    ", "  '~~~'    ", "          "],
+      ["   .-.     ", "  (- -)    ", "  | O |    ", "  '~~~'    ", "          "],
+    ],
+  },
+  robot: {
+    names: { zh: "机器人", en: "robot" },
+    color: COLORS.green,
+    frames: [
+      ["    ___     ___  ", "   | O |---| O | ", "   |___/   \\___|", "      \\_|_/      ", "                "],
+      ["    ___     ___  ", "   | - |---| - | ", "   |___/   \\___|", "      \\_|_/      ", "                "],
+    ],
+  },
+});
+
+const CAMPY_PET_IDS = Object.freeze(["cat", "hamster", "ghost", "robot"]);
+const CAMPY_PET_ID_BY_KEY = Object.freeze(Object.fromEntries(CAMPY_PET_IDS.map((id, index) => [String(index + 1), id])));
+
+function currentCampyPet(petId) {
+  return CAMPY_PETS[petId] || CAMPY_PETS.cat;
+}
+
+function campyPetShortcutText(language) {
+  return language === "zh" ? "宠物：1 猫 | 2 仓鼠 | 3 幽灵 | 4 机器人" : "Pets: 1 cat | 2 hamster | 3 ghost | 4 robot";
+}
+
+function campyPetCurrentText(petId, language) {
+  const pet = currentCampyPet(petId);
+  const name = pet.names[language] || pet.names.en;
+  return language === "zh" ? `Campy 宠物：${name}` : `Campy pet: ${name}`;
+}
+
+function campyPetWidget(petId, language, nowMs = Date.now()) {
+  const pet = currentCampyPet(petId);
+  const frame = pet.frames[Math.floor(nowMs / 1000) % pet.frames.length];
+  return [
+    { text: campyPetCurrentText(petId, language), color: pet.color, align: "right" },
+    ...frame.map((text) => ({ text, color: pet.color, align: "right" })),
+  ];
 }
 
 function displayProjectName(name, language) {
@@ -1029,6 +1102,305 @@ function readLatestQuota(maxFiles = 20) {
   return latest;
 }
 
+function tokenUsageCachePath(home = codexHome()) {
+  return path.join(home, "codex-thread-panel-token-usage-history.json");
+}
+
+const TOKEN_USAGE_TAIL_BYTES = 256 * 1024;
+const TOKEN_USAGE_SEARCH_BYTES = 64 * 1024;
+const TOKEN_USAGE_BASELINE_BYTES = 512 * 1024;
+
+function sessionFileCreatedAt(filePath) {
+  const match = String(filePath || "").match(/[\\/](\d{4})[\\/](\d{2})[\\/](\d{2})[\\/]/);
+  if (!match) return 0;
+  return new Date(`${match[1]}-${match[2]}-${match[3]}T00:00:00`).getTime();
+}
+
+function readFileRange(filePath, position, maxBytes) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, "r");
+    const size = fs.fstatSync(fd).size;
+    const start = Math.max(0, Math.min(size, Math.floor(position)));
+    const bytes = Math.max(0, Math.min(size - start, maxBytes));
+    if (!bytes) return { text: "", start, size };
+    const buffer = Buffer.allocUnsafe(bytes);
+    const read = fs.readSync(fd, buffer, 0, bytes, start);
+    return { text: buffer.toString("utf8", 0, read), start, size };
+  } catch {
+    return { text: "", start: 0, size: 0 };
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+      }
+    }
+  }
+}
+
+function tokenUsageSample(text, startsMidLine = false) {
+  const lines = String(text || "").split(/\r?\n/);
+  if (startsMidLine) lines.shift();
+  const records = [];
+  let firstTimestamp = 0;
+  let lastTimestamp = 0;
+  for (const line of lines) {
+    const record = parseJsonLine(line);
+    const timestamp = toDate(record?.timestamp)?.getTime() || 0;
+    if (!timestamp) continue;
+    if (!firstTimestamp || timestamp < firstTimestamp) firstTimestamp = timestamp;
+    if (timestamp > lastTimestamp) lastTimestamp = timestamp;
+    const totalTokens = Number(record?.payload?.thread_token_usage?.total_tokens);
+    if (record?.type === "token_usage_record" && Number.isFinite(totalTokens) && totalTokens >= 0) {
+      records.push({ timestamp, totalTokens: Math.round(totalTokens) });
+    }
+  }
+  return { firstTimestamp, lastTimestamp, records };
+}
+
+function readTokenUsageSample(file, position, maxBytes) {
+  const range = readFileRange(file.path, position, maxBytes);
+  return tokenUsageSample(range.text, range.start > 0);
+}
+
+function latestThreadTokenUsage(file) {
+  for (let end = file.size; end > 0; end -= TOKEN_USAGE_TAIL_BYTES) {
+    const start = Math.max(0, end - TOKEN_USAGE_TAIL_BYTES);
+    const sample = readTokenUsageSample(file, start, end - start);
+    const latest = sample.records.reduce((current, record) => (
+      !current || record.timestamp > current.timestamp ? record : current
+    ), null);
+    if (latest) return latest;
+    if (start === 0) break;
+  }
+  return null;
+}
+
+function findThreadTokenUsageAtOrBefore(file, targetMs) {
+  let low = 0;
+  let high = file.size;
+  let anchor = 0;
+
+  for (let attempt = 0; attempt < 30 && high - low > TOKEN_USAGE_SEARCH_BYTES; attempt++) {
+    const middle = Math.floor((low + high) / 2);
+    const sample = readTokenUsageSample(file, middle, TOKEN_USAGE_SEARCH_BYTES);
+    if (!sample.firstTimestamp || !sample.lastTimestamp) {
+      high = middle;
+      anchor = middle;
+    } else if (sample.lastTimestamp < targetMs) {
+      low = Math.min(file.size, middle + TOKEN_USAGE_SEARCH_BYTES);
+      anchor = low;
+    } else if (sample.firstTimestamp >= targetMs) {
+      high = middle;
+      anchor = high;
+    } else {
+      anchor = middle;
+      break;
+    }
+  }
+
+  for (let end = Math.min(file.size, Math.max(0, anchor + TOKEN_USAGE_SEARCH_BYTES)); end > 0; end -= TOKEN_USAGE_BASELINE_BYTES) {
+    const start = Math.max(0, end - TOKEN_USAGE_BASELINE_BYTES);
+    const sample = readTokenUsageSample(file, start, end - start + TOKEN_USAGE_SEARCH_BYTES);
+    const record = sample.records
+      .filter((item) => item.timestamp < targetMs)
+      .reduce((latest, item) => (!latest || item.timestamp > latest.timestamp ? item : latest), null);
+    if (record) return record.totalTokens;
+    if (start === 0) break;
+  }
+  return 0;
+}
+
+function normalizeTokenUsageSample(sample) {
+  const timestamp = Number(sample?.timestamp);
+  const totalTokens = Number(sample?.totalTokens);
+  if (!Number.isFinite(timestamp) || !Number.isFinite(totalTokens) || totalTokens < 0) return null;
+  return { timestamp, totalTokens: Math.round(totalTokens) };
+}
+
+function readTokenUsageCache(home = codexHome()) {
+  try {
+    const cache = JSON.parse(fs.readFileSync(tokenUsageCachePath(home), "utf8"));
+    return cache?.version === 2 && cache.files && typeof cache.files === "object" ? cache : { version: 2, files: {} };
+  } catch {
+    return { version: 2, files: {} };
+  }
+}
+
+function writeTokenUsageCache(home, files) {
+  const target = tokenUsageCachePath(home);
+  const temporary = `${target}.${process.pid}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify({ version: 2, files }), "utf8");
+    fs.renameSync(temporary, target);
+  } catch {
+    try {
+      fs.unlinkSync(temporary);
+    } catch {
+    }
+  }
+}
+
+function readTokenUsageHistory(home = codexHome(), nowMs = Date.now()) {
+  const cache = readTokenUsageCache(home);
+  const periods = ["day", "week", "month"].map((name) => ({ name, start: periodStart(nowMs, name) }));
+  const sessionFiles = [
+    ...walkFiles(path.join(home, "sessions")),
+    ...walkFiles(path.join(home, "archived_sessions")),
+  ];
+  const files = {};
+  const metrics = { day: 0, week: 0, month: 0, total: 0 };
+
+  for (const file of sessionFiles) {
+    const signature = `${file.mtimeMs}:${file.size}`;
+    const previous = cache.files[file.path];
+    const latest = previous?.signature === signature
+      ? normalizeTokenUsageSample(previous.latest)
+      : latestThreadTokenUsage(file);
+    const baselines = {};
+
+    if (latest) metrics.total += latest.totalTokens;
+
+    for (const period of periods) {
+      if (!latest || latest.timestamp < period.start) continue;
+      const cacheKey = String(period.start);
+      const cachedBaseline = Number(previous?.baselines?.[cacheKey]);
+      const baseline = Number.isFinite(cachedBaseline)
+        ? cachedBaseline
+        : sessionFileCreatedAt(file.path) < period.start
+          ? findThreadTokenUsageAtOrBefore(file, period.start)
+          : 0;
+      baselines[cacheKey] = baseline;
+      metrics[period.name] += Math.max(0, latest.totalTokens - baseline);
+    }
+    files[file.path] = { signature, latest, baselines };
+  }
+
+  writeTokenUsageCache(home, files);
+  return { status: "ready", metrics };
+}
+
+const ACCOUNT_USAGE_TIMEOUT_MS = 25_000;
+
+function codexAppServerExecutable() {
+  const configured = String(process.env.CODEX_BINARY || "").trim();
+  if (configured && fs.existsSync(configured)) return configured;
+
+  const binRoot = path.join(process.env.LOCALAPPDATA || "", "OpenAI", "Codex", "bin");
+  try {
+    const candidates = fs.readdirSync(binRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(binRoot, entry.name, "codex.exe"))
+      .filter((candidate) => fs.existsSync(candidate))
+      .map((candidate) => ({ candidate, mtimeMs: fs.statSync(candidate).mtimeMs }))
+      .sort((a, b) => b.mtimeMs - a.mtimeMs);
+    if (candidates.length) return candidates[0].candidate;
+  } catch {
+  }
+  return "codex.exe";
+}
+
+function appServerRequest(method, params) {
+  return new Promise((resolve) => {
+    let child;
+    let buffer = "";
+    let finished = false;
+    let timeout = null;
+
+    const finish = (result) => {
+      if (finished) return;
+      finished = true;
+      if (timeout) clearTimeout(timeout);
+      try {
+        child?.stdin?.end();
+      } catch {
+      }
+      try {
+        child?.kill();
+      } catch {
+      }
+      resolve(result || null);
+    };
+    const send = (message) => {
+      try {
+        child?.stdin?.write(`${JSON.stringify(message)}\n`);
+      } catch {
+        finish(null);
+      }
+    };
+
+    try {
+      child = cp.spawn(codexAppServerExecutable(), ["app-server", "--stdio"], {
+        windowsHide: true,
+        stdio: ["pipe", "pipe", "ignore"],
+      });
+    } catch {
+      finish(null);
+      return;
+    }
+
+    child.once("error", () => finish(null));
+    child.once("exit", () => {
+      if (!finished) finish(null);
+    });
+    child.stdout.on("data", (chunk) => {
+      buffer += chunk.toString("utf8");
+      let newline;
+      while ((newline = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, newline).trim();
+        buffer = buffer.slice(newline + 1);
+        if (!line) continue;
+        const message = parseJsonLine(line);
+        if (!message) continue;
+        if (message.id === 1) {
+          send({ method: "initialized", params: {} });
+          send({ id: 2, method, params });
+        } else if (message.id === 2) {
+          finish(message.result || null);
+        }
+      }
+    });
+    timeout = setTimeout(() => finish(null), ACCOUNT_USAGE_TIMEOUT_MS);
+    send({
+      id: 1,
+      method: "initialize",
+      params: { clientInfo: { name: "codex-thread-panel", version: "1.0.0" } },
+    });
+  });
+}
+
+function accountBucketTimestamp(value) {
+  const text = String(value || "");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) return new Date(`${text}T00:00:00`).getTime();
+  return toDate(text)?.getTime() || 0;
+}
+
+function accountTokenUsageMetrics(response, nowMs = Date.now()) {
+  const total = Number(response?.summary?.lifetimeTokens);
+  if (!Number.isFinite(total) || total < 0) return null;
+
+  const metrics = { day: 0, week: 0, month: 0, total: Math.round(total), source: "account" };
+  const periods = ["day", "week", "month"].map((name) => ({ name, start: periodStart(nowMs, name) }));
+  for (const bucket of Array.isArray(response?.dailyUsageBuckets) ? response.dailyUsageBuckets : []) {
+    const timestamp = accountBucketTimestamp(bucket?.startDate);
+    const tokens = Number(bucket?.tokens);
+    if (!timestamp || !Number.isFinite(tokens) || tokens < 0) continue;
+    for (const period of periods) {
+      if (timestamp >= period.start) metrics[period.name] += Math.round(tokens);
+    }
+  }
+  return metrics;
+}
+
+async function readTokenUsageSnapshot(home = codexHome(), nowMs = Date.now()) {
+  const accountRequest = appServerRequest("account/usage/read", {});
+  const localHistory = readTokenUsageHistory(home, nowMs);
+  const accountMetrics = accountTokenUsageMetrics(await accountRequest, nowMs);
+  if (accountMetrics) return { status: "ready", metrics: accountMetrics };
+  return localHistory;
+}
+
 function safePercent(value) {
   const number = Number(value || 0);
   return Math.max(0, Math.min(100, Math.round(number)));
@@ -1036,6 +1408,30 @@ function safePercent(value) {
 
 function remainingPercent(value) {
   return Math.max(0, Math.min(100, 100 - safePercent(value)));
+}
+
+function periodStart(nowMs, period) {
+  const date = new Date(nowMs);
+  date.setHours(0, 0, 0, 0);
+  if (period === "week") {
+    date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
+  } else if (period === "month") {
+    date.setDate(1);
+  }
+  return date.getTime();
+}
+
+function tokenUsageMetrics(history) {
+  if (history?.status !== "ready") {
+    return { status: history?.status || "loading", day: null, week: null, month: null, total: null };
+  }
+  return {
+    status: "ready",
+    day: Number(history.metrics?.day || 0),
+    week: Number(history.metrics?.week || 0),
+    month: Number(history.metrics?.month || 0),
+    total: Number(history.metrics?.total || 0),
+  };
 }
 
 function quotaHealth(window, nowMs = Date.now()) {
@@ -1181,7 +1577,8 @@ function panel(width, height, title, contentLines) {
     const text = typeof item === "string" ? item : item.text;
     const color = typeof item === "string" ? COLORS.gray : item.color;
     const selected = typeof item === "object" && item.selected;
-    const body = pad(text, width - 2);
+    const align = typeof item === "object" ? item.align : "left";
+    const body = align === "right" ? padLeft(text, width - 2) : pad(text, width - 2);
     lines.push(`${style("|", COLORS.dim)}${selected ? style(body, COLORS.selected) : style(body, color || COLORS.gray)}${style("|", COLORS.dim)}`);
   }
   lines.push(style(border, COLORS.dim));
@@ -1258,7 +1655,7 @@ function statsLines(threads, nodes, includeArchived, search, language) {
   return labelValueRows(language, rows);
 }
 
-function keyLines(promptMode, language, availableLines = 0) {
+function keyLines(promptMode, language, availableLines = 0, petId = "cat") {
   if (promptMode === "permission") {
     return [
       { text: ui(language, "permissionChoose"), color: COLORS.white },
@@ -1277,13 +1674,13 @@ function keyLines(promptMode, language, availableLines = 0) {
     ];
   }
   const compact = [
-    { text: ui(language, "keyLanguageQuit"), color: COLORS.white },
+    { text: `${ui(language, "keyLanguageQuit")} | ${language === "zh" ? "1-4：宠物" : "1-4: pets"}`, color: COLORS.white },
     { text: ui(language, "keyNavigation"), color: COLORS.gray },
-    { text: ui(language, "keyThreadActions"), color: COLORS.gray },
-    { text: ui(language, "keyOtherActions"), color: COLORS.gray },
+    { text: `${ui(language, "keyThreadActions")} | ${ui(language, "keyOtherActions")}`, color: COLORS.gray },
   ];
   const detailed = [
     { text: ui(language, "switchLanguage"), color: COLORS.white },
+    { text: campyPetShortcutText(language), color: COLORS.cyan },
     { text: ui(language, "quit"), color: COLORS.gray },
     { text: ui(language, "moveSelection"), color: COLORS.gray },
     { text: ui(language, "expandOpen"), color: COLORS.gray },
@@ -1297,14 +1694,76 @@ function keyLines(promptMode, language, availableLines = 0) {
     { text: ui(language, "archiveToggle"), color: COLORS.gray },
     { text: ui(language, "refresh"), color: COLORS.gray },
   ];
-  return availableLines >= detailed.length ? detailed : compact;
+  const widget = campyPetWidget(petId, language);
+  const frame = widget.slice(1);
+  const base = availableLines >= detailed.length + frame.length ? detailed : compact;
+  if (availableLines >= base.length + widget.length + 1) {
+    return [
+      ...base,
+      ...Array.from({ length: availableLines - base.length - widget.length }, () => ({ text: "", color: COLORS.gray })),
+      ...widget,
+    ];
+  }
+  if (availableLines < base.length + frame.length) return base;
+  return [
+    ...base,
+    ...Array.from({ length: availableLines - base.length - frame.length }, () => ({ text: "", color: COLORS.gray })),
+    ...frame,
+  ];
 }
 
-function quotaLines(quota, language) {
+function formatTokenCount(value) {
+  const total = Math.max(0, Math.round(Number(value || 0)));
+  const yi = total / 100_000_000;
+  const precision = total >= 100_000_000 ? 2 : total >= 1_000_000 ? 3 : 6;
+  return `${Number(yi.toFixed(precision))}亿`;
+}
+
+const API_EQUIVALENT_INPUT_USD_PER_MILLION = 1.25;
+const API_EQUIVALENT_OUTPUT_USD_PER_MILLION = 10;
+const API_EQUIVALENT_INPUT_SHARE = 0.5;
+const API_EQUIVALENT_CNY_PER_USD = 7.2;
+
+function formatApiEquivalentCost(value, language) {
+  const tokens = Number(value);
+  if (!Number.isFinite(tokens) || tokens < 0) return ui(language, "quotaUsageUnavailable");
+  const blendedUsdPerMillion = API_EQUIVALENT_INPUT_USD_PER_MILLION * API_EQUIVALENT_INPUT_SHARE
+    + API_EQUIVALENT_OUTPUT_USD_PER_MILLION * (1 - API_EQUIVALENT_INPUT_SHARE);
+  const usd = (tokens / 1_000_000) * blendedUsdPerMillion;
+  if (language !== "zh") return `~$${Math.round(usd / 10_000) * 10}k`;
+  const wan = (usd * API_EQUIVALENT_CNY_PER_USD) / 10_000;
+  return `约￥${Math.round(wan / 10) * 10}万`;
+}
+
+function tokenUsageValue(value, metrics, language) {
+  if (Number.isFinite(value)) return formatTokenCount(value);
+  if (metrics?.status === "loading") return ui(language, "quotaUsagePending");
+  return ui(language, "quotaUsageUnavailable");
+}
+
+function quotaLines(quota, metrics, language) {
+  const total = tokenUsageValue(metrics?.total, metrics, language);
+  const usageLines = [
+    {
+      text: ui(language, "tokenUsageSummary", {
+        day: tokenUsageValue(metrics?.day, metrics, language),
+        week: tokenUsageValue(metrics?.week, metrics, language),
+        month: tokenUsageValue(metrics?.month, metrics, language),
+      }),
+      color: COLORS.cyan,
+    },
+    {
+      text: Number.isFinite(metrics?.total)
+        ? ui(language, "tokenUsageTotal", { total, apiCost: formatApiEquivalentCost(metrics.total, language) })
+        : ui(language, "tokenUsageTotalPending", { total }),
+      color: COLORS.cyan,
+    },
+  ];
   if (!quota?.rate) {
     return [
       { text: ui(language, "quotaUnavailable"), color: COLORS.yellow },
       { text: ui(language, "quotaHint"), color: COLORS.gray },
+      ...usageLines,
       { text: `${ui(language, "now")}：${formatDate(new Date(), true)}`, color: COLORS.cyan },
     ];
   }
@@ -1325,6 +1784,7 @@ function quotaLines(quota, language) {
         color: quotaHealthColor(health),
       };
     }),
+    ...usageLines,
     { text: `${ui(language, "now")}：${formatDate(new Date(), true)}`, color: COLORS.cyan },
   ];
 }
@@ -1335,7 +1795,7 @@ function layout() {
   const leftWidth = Math.max(46, Math.floor(width * 0.5));
   const rightWidth = Math.max(1, width - leftWidth);
   const bodyHeight = height - 2;
-  const quotaHeight = 6;
+  const quotaHeight = 8;
   const detailsHeight = 12;
   const statsHeight = 8;
   const keysHeight = Math.max(5, bodyHeight - quotaHeight - detailsHeight - statsHeight);
@@ -1412,8 +1872,8 @@ function makeFrame(state) {
   const rightParts = [
     ...panel(l.rightWidth, l.detailsHeight, ui(language, "selection"), detailLines(selected, language)),
     ...panel(l.rightWidth, l.statsHeight, ui(language, "workspace"), statsLines(state.threads, nodes, state.includeArchived, state.search, language)),
-    ...panel(l.rightWidth, l.keysHeight, ui(language, "keys"), keyLines(state.promptMode, language, l.keysHeight - 2)),
-    ...panel(l.rightWidth, l.quotaHeight, ui(language, "quota"), quotaLines(state.quota, language)),
+    ...panel(l.rightWidth, l.keysHeight, ui(language, "keys"), keyLines(state.promptMode, language, l.keysHeight - 2, state.petId)),
+    ...panel(l.rightWidth, l.quotaHeight, ui(language, "quota"), quotaLines(state.quota, state.tokenUsageMetrics, language)),
   ];
 
   const lines = [];
@@ -1835,6 +2295,15 @@ function handleKey(state, key, renderer) {
     return true;
   }
 
+  const petId = CAMPY_PET_ID_BY_KEY[key];
+  if (petId) {
+    state.petId = petId;
+    state.status = language === "zh"
+      ? `已切换为 ${currentCampyPet(petId).names.zh}`
+      : `Switched to ${currentCampyPet(petId).names.en}`;
+    return true;
+  }
+
   const node = selectedNode(state.nodes, state.selectedIndex);
   if (key === "\x03" || key.toLowerCase() === "q") return false;
   if (key === "\x1b[A") {
@@ -1960,6 +2429,7 @@ function handleKey(state, key, renderer) {
     state.threads = readThreads();
     state.threadDataSignature = threadDataSignature();
     state.quota = readLatestQuota();
+    state.tokenUsageMetrics = tokenUsageMetrics(state.tokenUsageHistory);
     state.selectedIndex = 0;
     state.scrollTop = 0;
     state.status = ui(language, "refreshedData");
@@ -1991,11 +2461,37 @@ function handleKey(state, key, renderer) {
   return true;
 }
 
+function startTokenUsageWorker(onResult) {
+  let settled = false;
+  const settle = (result) => {
+    if (settled) return;
+    settled = true;
+    onResult(result);
+  };
+  try {
+    const worker = new Worker(__filename, { workerData: { task: "token-usage-history", home: codexHome() } });
+    worker.once("message", settle);
+    worker.once("error", () => settle({ status: "unavailable", metrics: {} }));
+    worker.once("exit", (code) => {
+      if (code !== 0) settle({ status: "unavailable", metrics: {} });
+    });
+    worker.unref();
+    return worker;
+  } catch {
+    setImmediate(() => settle({ status: "unavailable", metrics: {} }));
+    return null;
+  }
+}
+
 function main() {
   const state = {
     threads: readThreads(),
     threadDataSignature: threadDataSignature(),
     quota: readLatestQuota(),
+    tokenUsageHistory: { status: "loading", metrics: {} },
+    tokenUsageMetrics: null,
+    tokenUsageWorker: null,
+    petId: "cat",
     language: "zh",
     expanded: new Set([PINNED_SECTION_CWD]),
     includeArchived: false,
@@ -2011,6 +2507,7 @@ function main() {
     nodes: [],
     status: ui("zh", "initialStatus"),
   };
+  state.tokenUsageMetrics = tokenUsageMetrics(state.tokenUsageHistory);
   rebuildNodes(state);
 
   if (process.argv.includes("--check")) {
@@ -2035,6 +2532,7 @@ function main() {
 
   function cleanup() {
     if (resizeTimer) clearTimeout(resizeTimer);
+    state.tokenUsageWorker?.terminate();
     try {
       process.stdin.setRawMode(false);
     } catch {
@@ -2055,6 +2553,7 @@ function main() {
   process.stdin.setEncoding("utf8");
 
   let lastQuotaRead = Date.now();
+  let lastTokenUsageHistoryRefresh = Date.now();
   let lastThreadSignatureCheck = 0;
   let lastColumns = process.stdout.columns;
   let lastRows = process.stdout.rows;
@@ -2067,6 +2566,20 @@ function main() {
     } else {
       process.stdout.write(HIDE_CURSOR);
     }
+  }
+
+  function updateTokenUsageMetrics() {
+    state.tokenUsageMetrics = tokenUsageMetrics(state.tokenUsageHistory);
+  }
+
+  function refreshTokenUsageHistory() {
+    if (state.tokenUsageWorker) return;
+    state.tokenUsageWorker = startTokenUsageWorker((history) => {
+      state.tokenUsageWorker = null;
+      state.tokenUsageHistory = history?.status === "ready" ? history : { status: "unavailable", metrics: {} };
+      updateTokenUsageMetrics();
+      if (running) render();
+    });
   }
 
   function syncTerminalSize() {
@@ -2113,11 +2626,17 @@ function main() {
     if (Date.now() - lastQuotaRead > 10000) {
       state.quota = readLatestQuota();
       lastQuotaRead = Date.now();
+      updateTokenUsageMetrics();
+    }
+    if (Date.now() - lastTokenUsageHistoryRefresh > 600000) {
+      lastTokenUsageHistoryRefresh = Date.now();
+      refreshTokenUsageHistory();
     }
     render();
   }, 1000);
 
   render();
+  refreshTokenUsageHistory();
 }
 
 function splitKeys(chunk) {
@@ -2160,4 +2679,10 @@ function isIgnoredTerminalInput(key) {
   return false;
 }
 
-main();
+if (!isMainThread && workerData?.task === "token-usage-history") {
+  readTokenUsageSnapshot(workerData.home)
+    .then((result) => parentPort?.postMessage(result))
+    .catch(() => parentPort?.postMessage({ status: "unavailable", metrics: {} }));
+} else {
+  main();
+}

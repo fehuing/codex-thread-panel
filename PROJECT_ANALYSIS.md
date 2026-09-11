@@ -1,128 +1,78 @@
 # Codex Thread Panel 分析记录
 
-记录日期：2026-09-07
+更新日期：2026-09-12
 
-## Fact
+## 目标
 
-- 本地路径：`D:\codex_panel\codex-thread-panel`
-- 仓库：`https://github.com/fehuing/codex-thread-panel.git`
-- 当前分支：`master`
-- 当前上游提交：`2f7eff2 Remove local cross-thread bridge`
-- 拉取方式：`git pull --ff-only origin master`
-- 当前 README 运行方式：`.\Start-CodexThreadPanel.cmd`
-- 当前代码文件搜索结果：`README.md`、`CodexThreadPanelTui.js`、`.gitignore` 中没有 `Bridge`、`ManagedSession`、`Send-CodexThreadMessage`、`thread_panel_bridge`、`node-pty`、`package.json`、`package-lock` 引用。
-- 已删除本地 stash：`stash@{0}: local package-lock before pulling latest upstream`
-- `node_modules/` 是旧版 npm 安装留下的本地残留；删除命令被当前命令策略拒绝，尚未移除。
+为 Windows 上已安装 Codex CLI / Desktop 的用户提供一个本地终端面板，解决大量长期会话下“查找、恢复和管理某个任务”不够轻快的问题。项目专注于列表浏览与会话入口，不替代 Codex Desktop。
 
-## Inference
+## Fact：数据来源
 
-上游最新代码已经把本地跨线程 Bridge 功能完全移除。当前项目不再需要 `npm install`，也不再需要 `package.json`、`package-lock.json`、`CodexThreadBridge.js`、`CodexManagedSession.js`、`Send-CodexThreadMessage.ps1` 或 `@homebridge/node-pty-prebuilt-multiarch`。
+- 默认 Codex 数据目录为 `%USERPROFILE%\.codex`，可由 `CODEX_HOME` 覆盖。
+- 线程列表优先从 `state_5.sqlite` 读取；`session_index.jsonl` 用于补齐标题和更新时间。
+- Desktop 的置顶状态来自 `.codex-global-state.json` 的 `pinned-thread-ids`，不是 SQLite 中的旧置顶字段。
+- 线程的展示标题按 Desktop 的可用命名来源优先级合并：SQLite 原生名称、索引标题、其他标题字段和首条用户消息。无法获得标题时才使用稳定的占位标题。
+- 日、周、月和账号累计 Token 统计优先来自本机 Codex `app-server` 的只读 `account/usage/read`；返回包含账户汇总和逐日 bucket。
+- 若账户统计暂时不可用，面板降级为从 session JSONL 的已完成 `thread_token_usage.total_tokens` 汇总。这个降级值仅代表本机可读会话，不应标为账号总账。
 
-不确定性：这是基于当前本地代码搜索、README 和提交内容的判断；如果后续上游重新加入相关功能，需要重新检查。
+## Fact：性能策略
 
-## 当前项目用途
+- 列表页不读取每个 session JSONL 的会话内容；仅在 SQLite 和索引都不可用时，才对 JSONL 做受限元数据回退扫描。
+- 主列表刷新只检查 SQLite、WAL、session 索引和置顶配置的文件签名；没有变化时不重建列表。
+- quota 读取仅查看有限的近期 session 尾部区块，并且仅接受账户全局 `limit_id: codex` 额度事件，避免模型专属事件覆盖账户全局额度。
+- 账户 Token 查询在 Worker 线程中执行，短生命周期 `app-server` 完成后立即退出；首次查询与周期刷新都不阻塞键盘输入。
+- UI 每秒刷新一次，用于时钟、额度倒计时和宠物帧；不是高频全屏重绘。
 
-这是一个 Windows 定向的 Codex 本地线程面板。它读取本机 `%USERPROFILE%\.codex` 下的会话索引、SQLite 状态库和 session jsonl 文件，提供终端 UI 来浏览、搜索、打开、重命名、归档 Codex 线程，并显示 Codex quota 信息。
+## Fact：显示一致性
 
-## 主要文件
+- 项目列表采用显示宽度感知的固定列布局：项目名称、会话数量和更新时间各自拥有固定区域。
+- 详情和工作区统计采用固定的“标签 / 值”列，而不是直接拼接字符串。
+- Unicode 宽度算法区分扩展拉丁、CJK、组合音标和 emoji，因此带重音字母的项目名不会把后续列推移。
+- 置顶会话在顶部独立展示，遵循 Desktop 清单顺序，同时在详情区保留原项目归属；置顶会话不会在原项目下重复出现。
 
-- `CodexThreadPanelTui.js`：主 TUI；负责读取线程、渲染面板、处理快捷键、启动 Codex 窗口。
-- `Start-CodexThreadPanel.cmd`：默认启动脚本，执行 `node --no-warnings "%~dp0CodexThreadPanelTui.js"`。
-- `Start-CodexThreadPanel-Maximized.cmd`：最大化启动脚本。
-- `Start-CodexThreadPanel-Gui.cmd`：启动旧的 PowerShell/WinForms 原型。
-- `Rename-CodexThread.ps1`：重命名辅助脚本；写入 `thread_title_overrides.json`，并尝试同步 `session_index.jsonl`。
-- `Start-CodexLaunch.ps1`：打开可见 PowerShell Codex session 的辅助脚本。
-- `CodexThreadPanel.ps1`：早期 PowerShell/WinForms 原型，保留参考。
+## Fact：功能范围
 
-## 数据来源
+- 浏览、展开、搜索项目和会话。
+- 在可见的 PowerShell / Windows Terminal 窗口中启动 `codex resume`。
+- 在选中项目中创建会话，按本地状态库重命名或归档会话，打开项目文件夹。
+- `L` 即时切换中文 / 英文。
+- 常规状态下按 `1` 至 `4` 切换 Campy 猫、仓鼠、幽灵和机器人闲置动画；权限选择状态保留这些数字作为权限模式按键。
+- 只展示 Desktop 已有的置顶状态；当前不提供新增或取消置顶操作。
 
-- Codex home：默认 `C:\Users\Administrator\.codex`，也支持 `CODEX_HOME` 覆盖。
-- 正常线程列表来源：`state_5.sqlite`、`session_index.jsonl` 和桌面端 `.codex-global-state.json` 的 `pinned-thread-ids`；session jsonl 只在前两者均不可用时才会作为受限兜底读取。
-- quota 来源：最近 20 个 session jsonl 尾部的全局 `codex` `rate_limits` 事件，每个文件最多读取 256 KiB；模型专属额度事件不参与账户全局额度显示。
-- 标题覆盖文件：`thread_title_overrides.json`。
+## Fact：额度策略
 
-## 运行模型
+- 账号套餐展示直接取 Codex 返回的套餐类型；`prolite` 显示为 `Pro $100/月 · 5x`，`pro` 显示为 `Pro $200/月 · 20x`。
+- 额度状态同时比较剩余额度和本轮重置窗口的剩余时间：进度不落后为绿色；落后超过 10 个百分点，或剩余较少且仍有较长时间为橙色；耗尽、严重落后或极低余额为红色。
+- 累计 Token 使用“亿”作为显示单位。后面的 API 金额是基于简化输入 / 输出比例的调侃式估算，不是任何实际账单。
 
-普通打开线程时，面板会生成临时 PowerShell 脚本，再通过 `explorer.exe`、`wt.exe` 或 PowerShell launcher 打开一个新的 `codex resume` 窗口。启动参数会继承线程记录里的模型和 reasoning effort。
+## Inference：为什么这样做
 
-权限模式有四档：
+长期积累的 session JSONL 可以很大；如果每次启动、刷新或窗口变化都完整读取每份历史记录，列表浏览的延迟会随历史体量放大。SQLite 和 session 索引已经提供了首屏所需的 ID、标题、路径、状态和更新时间，因此将 JSONL 限制在无索引时的回退路径，能把工作量压缩到与列表元数据相关的规模。
 
-- `1 Safe`：`read-only + on-request`
-- `2 Normal`：`workspace-write + on-request`
-- `3 Auto`：`workspace-write + never`
-- `4 Full`：`danger-full-access + never`
+不确定性：Codex 的本地状态格式属于客户端实现细节，未来版本可能调整表结构、索引字段或 `app-server` 协议。代码保留多源合并与受限回退，但升级 Codex 后仍应执行下方验证。
 
-## 已验证命令
+## 隐私边界
+
+- 项目树、标题、路径、归档和置顶数据只从本机 Codex 目录读取。
+- 面板不要求额外 API Key，也不保存登录凭据。
+- 开启、恢复会话均在本机启动 Codex CLI。
+- 公开 README 中的截图由真实渲染函数喂入虚构 `REDACTED` 数据生成；不使用真实项目、路径或会话标题。
+
+## 验证清单
 
 ```powershell
-git fetch origin
-git pull --ff-only origin master
-git stash drop 'stash@{0}'
-rg -n 'Bridge|ManagedSession|Send-CodexThreadMessage|thread_panel_bridge|node-pty|package-lock|package\.json' README.md CodexThreadPanelTui.js .gitignore
+node --check .\CodexThreadPanelTui.js
+node --no-warnings .\CodexThreadPanelTui.js --check
+git diff --check
 ```
 
-## 2026-09-07 性能优化记录
+另外，针对 Campy 快捷键与布局执行了不启动 TUI 主循环的渲染测试，覆盖：
 
-### Fact
+- 紧凑高度下的快捷键布局；
+- 宽终端下右下角宠物的渲染；
+- `1` 至 `4` 宠物切换；
+- 权限模式不抢占 `1` 至 `4` 的权限选择。
 
-- 本机 `sessions` 与 `archived_sessions` 共有 397 个 jsonl 文件，合计 20.87 GB；最大单文件为 4.32 GB。
-- 外部 `sqlite3.exe` 在当前终端不可用；Node 24.13.0 提供可用的 `node:sqlite` 接口。
-- 优化前的 TUI 会无条件读取全部 session jsonl；额度刷新每 10 秒会把最近文件完整读入内存。此前 `node CodexThreadPanelTui.js --check` 在 90 秒内没有返回。
-- 优化后，`node --no-warnings .\CodexThreadPanelTui.js --check` 实际输出 395 个线程、22 个项目，耗时 321 ms。
+## 第三方组件
 
-### 改动
-
-- `CodexThreadPanelTui.js` 优先通过 Node 内置 SQLite 查询线程列表，保留外部 sqlite3 的兼容回退。
-- 有 SQLite 或 session index 数据时，列表页不读取任何 session jsonl；两类索引均不可用时，兜底扫描每个文件最多读取开头 256 KiB。
-- 会话排序和显示时间优先使用 `state_5.sqlite` 的最近活动时间；`session_index.jsonl` 仅在其时间更晚时才覆盖。面板每 5 秒只检查状态库、WAL 和索引文件的元数据，检测到变更才刷新线程列表，并保留当前选中的项目或线程。
-- quota 刷新改为仅读取最近 20 个文件各自末尾 256 KiB，不再全量读取，也不再在找不到结果时扫描全部历史文件。
-- 渲染定时器从 250 ms 调整为 1000 ms，初始 quota 查询后延迟 10 秒再刷新。
-- 两个 CLI 启动脚本使用 `--no-warnings`，避免 Node 内置 SQLite 的实验性提示干扰 TUI。
-- 窗口缩放改为监听终端 resize 事件并在 75 ms 后合并重绘；尺寸变化不再清屏，只重画差异行。每秒一次的尺寸检查保留为不支持 resize 事件的终端兜底。
-
-### 限制
-
-- 已经打开的旧 Node 面板进程不会热更新；需要按 `Q` 退出后重新运行 `.\Start-CodexThreadPanel.cmd`。
-- `Start-CodexThreadPanel-Gui.cmd` 启动的是另一套旧 PowerShell/WinForms 原型，不包含本次 TUI 性能优化。
-
-## 2026-09-07 客户端列表对齐
-
-### Fact
-
-- 当前 Codex `threads` 表含有新的 `name`、`thread_source` 字段。官方客户端将 `name` 或 `session_index.jsonl` 的 `thread_name` 作为短标题来源；旧面板仅查询 `title`，因此会显示原始长提示词或 `Untitled thread`。
-- 本机 `douyin` 项目顶部的无标题记录属于委派辅助线程；它们没有 `name`、`thread_name`、`title` 或首条用户消息。
-- 官方客户端仍显示两条旧的委派任务“西语电影解说—独立校对与质检”和“西语电影解说—文案与配音”，因为它们在 `session_index.jsonl` 中有正式标题。
-- 优化后的面板实测 `douyin` 项目无 `Untitled thread`，展示了上述两条西语任务，以及“分析TK视频复刻可行性”“定位短视频卡点原片位置”“解释视频剪辑显卡需求原理”。
-
-### 改动
-
-- 列表标题优先级调整为 `threads.name`、`session_index.thread_name`、旧 `title`、首条用户消息；不再使用面板私有的 `thread_title_overrides.json` 作为显示来源。
-- 所有 `guardian_review` 内部审阅记录都会隐藏；无用户可见标题的 `subagent` 记录也会隐藏，保留拥有正式标题的历史委派任务。
-- TUI 内按 `T` 改名不再开启旧 PowerShell 改名脚本，而是更新 `state_5.sqlite` 的 `threads.name`，并同步旧 session index 以保持兼容。
-
-### 置顶
-
-- 桌面端置顶状态以 `.codex-global-state.json` 的 `pinned-thread-ids` 为准，而不是 `state_5.sqlite.is_pinned`；当前数据库字段全部为 `0`，而桌面端全局清单维护置顶线程。
-- 面板在列表顶部显示独立的“置顶”区，严格按桌面端清单顺序排列；置顶线程不会在原项目列表中重复，选中后仍可在详情查看原项目归属。面板仅读取，不提供新增或取消置顶操作。
-
-## 2026-09-07 界面语言
-
-### Fact
-
-- TUI 默认语言为中文；`L` 可在中文和英文界面之间即时切换。
-- 本地化范围包括面板标题、分区标题、列表和详情标签、状态提示、搜索/路径/改名输入提示、权限模式、额度信息、滚动提示和快捷键说明。
-- 工作区统计区按终端显示宽度统一标签和值的分隔列，中文标签与英文标签都保持值列对齐。
-- 快捷键说明在空间足够时逐项竖排；窗口较矮时自动切换为四行紧凑版，并始终将 `L` 语言切换置于第一行。
-- 已执行 `node --check CodexThreadPanelTui.js`、`git diff --check`、`node --no-warnings .\CodexThreadPanelTui.js --check`；线程索引检查正常完成，当前读取到 170 个线程、22 个项目。
-- 使用不启动 TUI 主循环的 Node 验证脚本，确认默认渲染帧含“Codex 线程面板”和 `L：中英文切换`，按 `L` 后切换为“Codex Thread Panel”和 `L: switch Chinese / English`。
-- 根因：项目行、详情行和统计行曾分别通过字符串拼接生成；可变长度的项目名或中文宽字符会推动后续字段，造成数量、日期或值列错位。
-- 已统一为显示宽度感知的列布局函数：项目列表固定“名称 / 数量 / 更新时间”列，详情与统计区固定“标签 / 值”列。针对不同长度的中英文项目名和标题，已验证三类区域的列起始位置一致。
-- 后续发现并修复 Unicode 宽度算法缺口：旧实现将全部非 ASCII 字符当作双宽，导致 `Pokémon` 中的 `é` 被错误计为双宽，使该项目行的数量和日期向左偏一格。现按 Unicode 类别处理单宽扩展拉丁字符、双宽 CJK、零宽组合音标和 emoji 图形，并让截断逻辑复用同一规则。
-- Codex app-server 的 `GetAccountResponse` 将 `pro` 和 `prolite` 定义为不同的账户套餐类型；本机实时额度事件返回 `plan_type: pro`，且当前客户端套餐页显示 `$200/月`。面板据此直接显示 `Pro $200/月 · 20x`；`prolite` 显示 `Pro $100/月 · 5x`。不再使用任何手动设置或面板私有偏好。
-- 根因：会话记录同时包含账户全局 `limit_id: codex` 和模型专属 `limit_id: codex_bengalfox`（`GPT-5.3-Codex-Spark`）的额度事件；后者的 `0%/0%` 曾因更新时间更新而覆盖前者。面板现仅读取 `codex`，并只渲染事件实际提供的额度窗口，不再把缺失窗口显示为 `100%`。
-- 额度健康度按“剩余额度相对本轮重置窗口的剩余时间”判定：额度不落后于时间进度为良好（绿）；落后超过 10 个百分点，或额度低于 15% 且本轮仍剩超过 35% 时为中等（橙）；已耗尽、额度低于 5% 且本轮仍剩超过 15%、或落后超过 25 个百分点时为严重（红）。缺少有效重置时间时，按剩余 30% / 10% 作为中等 / 严重的保守兜底阈值。
-- 官方当前说明：Pro $100 为 Plus 的 5x 用量，Pro $200 为 Plus 的 20x 用量。
-
-### 限制
-
-- 语言选择只保存在当前面板进程内；重新启动面板时会恢复默认中文。
+四组 Campy ASCII 宠物闲置帧选自 `dropdevrahul/campy` 的 MIT 许可源码提交 `814566b7df24512c64884550bd22589d5fedd2d4`。项目不安装 Campy，也不接入其 MCP、hook 或自动配置能力；完整许可见 `THIRD_PARTY_NOTICES.md`。
